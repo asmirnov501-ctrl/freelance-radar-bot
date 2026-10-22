@@ -12,30 +12,37 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
+CATEGORIES = {
+    "design": "🎨 Дизайн & UX/UI",
+    "dev": "💻 Разработка & Код",
+    "text": "✍️ Тексты & Копирайтинг",
+    "marketing": "📈 Маркетинг & Трафик"
+}
+
 user_preferences = {}
 
-def get_categories_keyboard():
-    buttons = [
-        [InlineKeyboardButton(text="🎨 Дизайн & UX/UI", callback_data="cat_design")],
-        [InlineKeyboardButton(text="💻 Разработка & Код", callback_data="cat_dev")],
-        [InlineKeyboardButton(text="✍️ Тексты & Копирайтинг", callback_data="cat_text")],
-        [InlineKeyboardButton(text="📈 Маркетинг & Трафик", callback_data="cat_marketing")],
-        [InlineKeyboardButton(text="✅ Готово / Запустить радар", callback_data="start_radar")]
-    ]
+def get_categories_keyboard(user_id):
+    selected = user_preferences.get(user_id, set())
+    buttons = []
+    
+    for code, name in CATEGORIES.items():
+        prefix = "✅ " if code in selected else "▫️ "
+        buttons.append([InlineKeyboardButton(text=f"{prefix}{name}", callback_data=f"cat_{code}")])
+        
+    buttons.append([InlineKeyboardButton(text="🚀 Запустить радар", callback_data="start_radar")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    if user_id not in user_preferences:
-        user_preferences[user_id] = []
+    user_preferences[user_id] = set()
         
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
-        f"Я **Freelance Radar AI** — ищу свежие заказы на биржах и в Telegram-каналах.\n"
-        f"Я отсекаю спам и присылаю только целевые проекты.\n\n"
-        f"**Выбери свои направления работы:**",
-        reply_markup=get_categories_keyboard(),
+        f"Я **Freelance Radar AI** — ищу свежие заказы на биржах и в Telegram-каналах.\n\n"
+        f"🎯 **Выбери категории для отслеживания:**\n"
+        f"*(нажимай на кнопки ниже, чтобы поставить галочки)*",
+        reply_markup=get_categories_keyboard(user_id),
         parse_mode="Markdown"
     )
 
@@ -45,32 +52,36 @@ async def process_category(callback: CallbackQuery):
     category = callback.data.replace("cat_", "")
     
     if user_id not in user_preferences:
-        user_preferences[user_id] = []
+        user_preferences[user_id] = set()
         
     if category in user_preferences[user_id]:
         user_preferences[user_id].remove(category)
-        await callback.answer("Категория удалена")
+        await callback.answer("Категория убрана")
     else:
-        user_preferences[user_id].append(category)
+        user_preferences[user_id].add(category)
         await callback.answer("Категория добавлена!")
+        
+    await callback.message.edit_reply_markup(reply_markup=get_categories_keyboard(user_id))
 
 @dp.callback_query(F.data == "start_radar")
 async def start_radar(callback: CallbackQuery):
     user_id = callback.from_user.id
-    selected = user_preferences.get(user_id, [])
+    selected = user_preferences.get(user_id, set())
     
     if not selected:
-        await callback.answer("Пожалуйста, выберите хотя бы одну категорию!", show_alert=True)
+        await callback.answer("⚠️ Выберите хотя бы одну категорию!", show_alert=True)
         return
         
+    selected_names = "\n".join([f"• {CATEGORIES[code]}" for code in selected])
+    
     await callback.message.edit_text(
-        "🚀 **Радар успешно запущен!**\n\n"
-        "Как только появится подходящий заказ, я сразу пришлю его сюда.\n"
-        "Первые 3 дня доступа — **БЕСПЛАТНО**.",
+        f"🚀 **Радар успешно запущен!**\n\n"
+        f"**Выбранные категории:**\n{selected_names}\n\n"
+        f"Как только появится подходящий заказ, я сразу пришлю его сюда.\n"
+        f"Первые 3 дня доступа — **БЕСПЛАТНО**.",
         parse_mode="Markdown"
     )
 
-# Мини-сервер для бесплатного тарифа Render Web Service
 async def handle(request):
     return web.Response(text="Bot is running!")
 
@@ -89,4 +100,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
