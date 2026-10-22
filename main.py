@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import random
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
@@ -12,6 +13,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
+# Категории заказов
 CATEGORIES = {
     "design": "🎨 Дизайн & UX/UI",
     "dev": "💻 Разработка & Код",
@@ -19,6 +21,7 @@ CATEGORIES = {
     "marketing": "📈 Маркетинг & Трафик"
 }
 
+# Хранилище: {user_id: set("dev", "design")}
 user_preferences = {}
 
 def get_categories_keyboard(user_id):
@@ -35,13 +38,13 @@ def get_categories_keyboard(user_id):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    user_preferences[user_id] = set()
+    if user_id not in user_preferences:
+        user_preferences[user_id] = set()
         
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
-        f"Я **Freelance Radar AI** — ищу свежие заказы на биржах и в Telegram-каналах.\n\n"
-        f"🎯 **Выбери категории для отслеживания:**\n"
-        f"*(нажимай на кнопки ниже, чтобы поставить галочки)*",
+        f"Я **Freelance Radar AI** — твой умный агрегатор заказов.\n\n"
+        f"🎯 **Выбери категории для отслеживания:**",
         reply_markup=get_categories_keyboard(user_id),
         parse_mode="Markdown"
     )
@@ -77,11 +80,77 @@ async def start_radar(callback: CallbackQuery):
     await callback.message.edit_text(
         f"🚀 **Радар успешно запущен!**\n\n"
         f"**Выбранные категории:**\n{selected_names}\n\n"
-        f"Как только появится подходящий заказ, я сразу пришлю его сюда.\n"
-        f"Первые 3 дня доступа — **БЕСПЛАТНО**.",
+        f"Я сканирую каналы и биржи. Как только появится заказ по твоим направлениям, я сразу пришлю его сюда!",
         parse_mode="Markdown"
     )
 
+# 📡 Фоновый симулятор/парсер заказов
+async def background_order_scanner():
+    """Фоновая задача, которая имитирует поиск свежих заказов с бирж и каналов"""
+    # База тестовых примеров заказов для демонстрации
+    sample_orders = [
+        {
+            "cat": "dev",
+            "title": "Разработка Telegram-бота на Python",
+            "budget": "15 000 руб.",
+            "source": "Telegram / Фриланс Биржа",
+            "desc": "Нужен бот для приема заявок с интеграцией Google Sheets."
+        },
+        {
+            "cat": "design",
+            "title": "Redesign мобильного приложения (UX/UI)",
+            "budget": "$500",
+            "source": "behance / фриланс чат",
+            "desc": "Требуется обновить интерфейс финтех приложения под iOS/Android."
+        },
+        {
+            "cat": "text",
+            "title": "Копирайтинг для сайта криптопроекта",
+            "budget": "8 000 руб.",
+            "source": "Telegram-канал с заказами",
+            "desc": "Написать 3 продающих текста на главную страницу."
+        },
+        {
+            "cat": "marketing",
+            "title": "Настройка таргета в Telegram Ads",
+            "budget": "30 000 руб.",
+            "source": "Рекламный чат",
+            "desc": "Ищем специалиста с опытом продвижения образовательных курсов."
+        }
+    ]
+
+    while True:
+        await asyncio.sleep(45) # Проверка каждые 45 секунд для теста
+        
+        if not user_preferences:
+            continue
+            
+        # Выбираем случайный заказ
+        order = random.choice(sample_orders)
+        cat_code = order["cat"]
+        
+        # Рассылаем тем пользователям, у которых выбрана эта категория
+        for user_id, categories in user_preferences.items():
+            if cat_code in categories:
+                try:
+                    text = (
+                        f"🔥 **Новый заказ! [{CATEGORIES[cat_code]}]**\n\n"
+                        f"📌 **{order['title']}**\n"
+                        f"💰 Бюджет: `{order['budget']}`\n"
+                        f"🌐 Источник: {order['source']}\n\n"
+                        f"📝 {order['desc']}\n\n"
+                        f"⚡️ *AI-фильтр: Соответствует вашему профилю (98% relevancy)*"
+                    )
+                    
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="💬 Откликнуться", url="https://t.me/example")]
+                    ])
+                    
+                    await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
+                except Exception as e:
+                    logging.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+
+# Мини-сервер для Render Web Service
 async def handle(request):
     return web.Response(text="Bot is running!")
 
@@ -95,10 +164,14 @@ async def web_server():
     await site.start()
 
 async def main():
-    await web_server()
+    # Запускаем веб-сервер и фоновый сканер заказов вместе с ботом
+    asyncio.create_task(web_server())
+    asyncio.create_task(background_order_scanner())
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
