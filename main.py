@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import os
-import random
+import re
+import feedparser
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
@@ -13,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# Категории заказов
+# Доступные категории
 CATEGORIES = {
     "design": "🎨 Дизайн & UX/UI",
     "dev": "💻 Разработка & Код",
@@ -21,8 +22,24 @@ CATEGORIES = {
     "marketing": "📈 Маркетинг & Трафик"
 }
 
-# Хранилище: {user_id: set("dev", "design")}
+# Список реальных RSS-лент фриланс-источников
+RSS_SOURCES = [
+    {
+        "name": "Habr Freelance",
+        "url": "https://freelance.habr.com/tasks.rss",
+        "default_cat": "dev"
+    }
+]
+
+# Множество для хранения ID уже отправленных заказов (чтобы не дублировать)
+sent_orders = set()
 user_preferences = {}
+
+def clean_html(raw_html):
+    """Очистка текста от HTML-тегов"""
+    cleanr = re.compile('<.*?>')
+    cleantext = re.sub(cleanr, '', raw_html)
+    return cleantext.strip()[:300] + "..." if len(cleantext) > 300 else cleantext.strip()
 
 def get_categories_keyboard(user_id):
     selected = user_preferences.get(user_id, set())
@@ -43,7 +60,7 @@ async def cmd_start(message: types.Message):
         
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
-        f"Я **Freelance Radar AI** — твой умный агрегатор заказов.\n\n"
+        f"Я **Freelance Radar AI** — твой умный агрегатор реальных заказов.\n\n"
         f"🎯 **Выбери категории для отслеживания:**",
         reply_markup=get_categories_keyboard(user_id),
         parse_mode="Markdown"
@@ -80,75 +97,62 @@ async def start_radar(callback: CallbackQuery):
     await callback.message.edit_text(
         f"🚀 **Радар успешно запущен!**\n\n"
         f"**Выбранные категории:**\n{selected_names}\n\n"
-        f"Я сканирую каналы и биржи. Как только появится заказ по твоим направлениям, я сразу пришлю его сюда!",
+        f"🌐 Мониторинг бирж и каналов активен. Ожидайте свежие проекты...",
         parse_mode="Markdown"
     )
 
-# 📡 Фоновый симулятор/парсер заказов
-async def background_order_scanner():
-    """Фоновая задача, которая имитирует поиск свежих заказов с бирж и каналов"""
-    # База тестовых примеров заказов для демонстрации
-    sample_orders = [
-        {
-            "cat": "dev",
-            "title": "Разработка Telegram-бота на Python",
-            "budget": "15 000 руб.",
-            "source": "Telegram / Фриланс Биржа",
-            "desc": "Нужен бот для приема заявок с интеграцией Google Sheets."
-        },
-        {
-            "cat": "design",
-            "title": "Redesign мобильного приложения (UX/UI)",
-            "budget": "$500",
-            "source": "behance / фриланс чат",
-            "desc": "Требуется обновить интерфейс финтех приложения под iOS/Android."
-        },
-        {
-            "cat": "text",
-            "title": "Копирайтинг для сайта криптопроекта",
-            "budget": "8 000 руб.",
-            "source": "Telegram-канал с заказами",
-            "desc": "Написать 3 продающих текста на главную страницу."
-        },
-        {
-            "cat": "marketing",
-            "title": "Настройка таргета в Telegram Ads",
-            "budget": "30 000 руб.",
-            "source": "Рекламный чат",
-            "desc": "Ищем специалиста с опытом продвижения образовательных курсов."
-        }
-    ]
-
+# 📡 Настоящий фоновый парсер заказов
+async def real_order_scanner():
     while True:
-        await asyncio.sleep(45) # Проверка каждые 45 секунд для теста
-        
-        if not user_preferences:
-            continue
+        try:
+            for source in RSS_SOURCES:
+                feed = feedparser.parse(source["url"])
+                
+                for entry in feed.entries[:5]: # Берем последние 5 записей
+                    order_id = entry.get("id", entry.link)
+                    
+                    if order_id in sent_orders:
+                        continue
+                        
+                    title = entry.title
+                    link = entry.link
+                    summary = clean_html(entry.get("summary", "Описание отсутствует"))
+                    
+                    # Простейшая фильтрация по ключевым словам для категории
+                    cat_code = source["default_cat"]
+                    title_lower = title.lower()
+                    if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер"]):
+                        cat_code = "design"
+                    elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост"]):
+                        cat_code = "text"
+                    elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm"]):
+                        cat_code = "marketing"
+                    
+                    # Рассылка подписчикам
+                    for user_id, categories in user_preferences.items():
+                        if cat_code in categories:
+                            try:
+                                text = (
+                                    f"🔥 **Новый реальный заказ! [{CATEGORIES[cat_code]}]**\n\n"
+                                    f"📌 **{title}**\n"
+                                    f"🌐 Источник: `{source['name']}`\n\n"
+                                    f"📝 {summary}\n\n"
+                                    f"⚡️ *AI-Status: Настоящий заказ с биржи*"
+                                )
+                                
+                                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                                    [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=link)]
+                                ])
+                                
+                                await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
+                            except Exception as e:
+                                logging.error(f"Ошибка отправки пользователю {user_id}: {e}")
+                                
+                    sent_orders.add(order_id)
+        except Exception as e:
+            logging.error(f"Ошибка при парсинге RSS: {e}")
             
-        # Выбираем случайный заказ
-        order = random.choice(sample_orders)
-        cat_code = order["cat"]
-        
-        # Рассылаем тем пользователям, у которых выбрана эта категория
-        for user_id, categories in user_preferences.items():
-            if cat_code in categories:
-                try:
-                    text = (
-                        f"🔥 **Новый заказ! [{CATEGORIES[cat_code]}]**\n\n"
-                        f"📌 **{order['title']}**\n"
-                        f"💰 Бюджет: `{order['budget']}`\n"
-                        f"🌐 Источник: {order['source']}\n\n"
-                        f"📝 {order['desc']}\n\n"
-                        f"⚡️ *AI-фильтр: Соответствует вашему профилю (98% relevancy)*"
-                    )
-                    
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="💬 Откликнуться", url="https://t.me/example")]
-                    ])
-                    
-                    await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
-                except Exception as e:
-                    logging.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+        await asyncio.sleep(60) # Проверка каждые 60 секунд
 
 # Мини-сервер для Render Web Service
 async def handle(request):
@@ -164,14 +168,9 @@ async def web_server():
     await site.start()
 
 async def main():
-    # Запускаем веб-сервер и фоновый сканер заказов вместе с ботом
     asyncio.create_task(web_server())
-    asyncio.create_task(background_order_scanner())
-    
+    asyncio.create_task(real_order_scanner())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
