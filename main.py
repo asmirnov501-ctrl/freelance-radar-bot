@@ -37,7 +37,9 @@ REGIONS = {
     "int": "🌐 Международные биржи"
 }
 
+# Расширенный список источников (RU + Global)
 RSS_SOURCES = [
+    # --- 🇷🇺 RU Источники ---
     {
         "name": "Habr Freelance",
         "url": "https://freelance.habr.com/tasks.rss",
@@ -49,6 +51,25 @@ RSS_SOURCES = [
         "url": "https://www.fl.ru/rss/all.xml",
         "default_cat": "dev",
         "region": "ru"
+    },
+    {
+        "name": "Freelance.ru",
+        "url": "https://www.freelance.ru/rss/all",
+        "default_cat": "dev",
+        "region": "ru"
+    },
+    # --- 🌐 Global Источники ---
+    {
+        "name": "Freelancer.com",
+        "url": "https://www.freelancer.com/rss.xml",
+        "default_cat": "dev",
+        "region": "int"
+    },
+    {
+        "name": "We Work Remotely",
+        "url": "https://weworkremotely.com/remote-jobs.rss",
+        "default_cat": "dev",
+        "region": "int"
     }
 ]
 
@@ -73,7 +94,6 @@ def get_main_reply_keyboard(user_id: int):
         kb.append([KeyboardButton(text="👑 Админ-панель")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# Клавиатура ШАГА 1: Регионы
 def get_regions_keyboard(user_id):
     selected_regs = user_regions.get(user_id, {"ru"})
     buttons = []
@@ -85,7 +105,6 @@ def get_regions_keyboard(user_id):
     buttons.append([InlineKeyboardButton(text="Далее: Выбор категорий ➡️", callback_data="go_step2")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# Клавиатура ШАГА 2: Категории
 def get_categories_keyboard(user_id):
     selected_cats = user_preferences.get(user_id, set())
     buttons = []
@@ -107,7 +126,7 @@ def clean_html(raw_html):
 
 def smart_ai_filter(title, summary):
     full_text = (title + " " + summary).lower()
-    budget_match = re.search(r'(\d+[\s\d]*)\s?(руб|₽|\$|usd|тыс|р\.)', full_text)
+    budget_match = re.search(r'(\d+[\s\d]*)\s?(руб|₽|\$|usd|eur|€|тыс|р\.)', full_text)
     budget = budget_match.group(0).upper() if budget_match else "По договоренности"
     return budget, 95
 
@@ -135,22 +154,23 @@ async def send_latest_order_immediately(user_id: int):
         if feed and hasattr(feed, "entries") and feed.entries:
             for entry in feed.entries[:10]:
                 title = entry.title
+                link = entry.link
                 summary = clean_html(entry.get("summary", "Описание отсутствует"))
                 cat_code = source["default_cat"]
                 title_lower = title.lower()
                 
-                if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка", "figma", "tilda"]):
+                if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка", "figma", "tilda", "design"]):
                     cat_code = "design"
-                elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод", "рерайт"]):
+                elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод", "рерайт", "content", "writing"]):
                     cat_code = "text"
-                elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид", "seo", "директ"]):
+                elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид", "seo", "директ", "marketing"]):
                     cat_code = "marketing"
-                elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "react", "vue", "node", "c#", "java", "1с"]):
+                elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "react", "vue", "node", "c#", "java", "1с", "developer"]):
                     cat_code = "dev"
                     
                 if not user_cats or cat_code in user_cats:
                     budget, relevancy = smart_ai_filter(title, summary)
-                    reg_badge = "🇷🇺 RU" if source["region"] == "ru" else "🌐 INT"
+                    reg_badge = "🇷🇺 RU" if source["region"] == "ru" else "🌐 GLOBAL"
                     text = (
                         f"⚡️ **Свежий заказ с биржи [{CATEGORIES[cat_code]}] ({reg_badge})**\n\n"
                         f"📌 **{title}**\n"
@@ -160,7 +180,7 @@ async def send_latest_order_immediately(user_id: int):
                         f"⚡️ *AI-фильтр: {relevancy}% relevancy*"
                     )
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=entry.link)]
+                        [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=link)]
                     ])
                     await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
                     return
@@ -177,8 +197,8 @@ async def trigger_radar_activation(user_id: int, message_or_callback):
     text_success = (
         "🚀 **Радар успешно запущен!**\n\n"
         "🛰 **Как поступают заказы:**\n"
-        "• Ниже прислан **последний актуальный проект** с биржи для проверки связи.\n"
-        "• Бот сканирует ленты каждые **45 секунд**.\n"
+        "• Ниже прислан **последний актуальный проект** с бирж для проверки связи.\n"
+        "• Бот сканирует все источники каждые **45 секунд**.\n"
         "• Заказы отправляются **сразу в момент публикации**!"
     )
     
@@ -280,7 +300,6 @@ async def btn_help(message: types.Message):
         parse_mode="Markdown"
     )
 
-# Обработка кликов на Шаге 1 (Регионы)
 @dp.callback_query(F.data.startswith("step1_reg_"))
 async def process_region_step1(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -299,7 +318,6 @@ async def process_region_step1(callback: CallbackQuery):
         await callback.answer("Регион включен!")
     await callback.message.edit_reply_markup(reply_markup=get_regions_keyboard(user_id))
 
-# Переход к Шагу 2
 @dp.callback_query(F.data == "go_step2")
 async def go_to_step2(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -311,7 +329,6 @@ async def go_to_step2(callback: CallbackQuery):
     )
     await callback.answer()
 
-# Возврат к Шагу 1
 @dp.callback_query(F.data == "go_step1")
 async def go_to_step1(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -323,7 +340,6 @@ async def go_to_step1(callback: CallbackQuery):
     )
     await callback.answer()
 
-# Обработка кликов на Шаге 2 (Категории)
 @dp.callback_query(F.data.startswith("step2_cat_"))
 async def process_category_step2(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -389,13 +405,13 @@ async def real_order_scanner():
                         source_region = source["region"]
                         title_lower = title.lower()
                         
-                        if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка", "figma", "tilda"]):
+                        if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка", "figma", "tilda", "design"]):
                             cat_code = "design"
-                        elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод", "рерайт"]):
+                        elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод", "рерайт", "content", "writing"]):
                             cat_code = "text"
-                        elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид", "seo", "директ"]):
+                        elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид", "seo", "директ", "marketing"]):
                             cat_code = "marketing"
-                        elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "react", "vue", "node", "c#", "java", "1с"]):
+                        elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "react", "vue", "node", "c#", "java", "1с", "developer"]):
                             cat_code = "dev"
 
                         budget, relevancy = smart_ai_filter(title, summary)
@@ -405,7 +421,7 @@ async def real_order_scanner():
                                 user_regs = user_regions.get(user_id, {"ru"})
                                 if source_region in user_regs and (not categories or cat_code in categories):
                                     try:
-                                        reg_badge = "🇷🇺 RU" if source_region == "ru" else "🌐 INT"
+                                        reg_badge = "🇷🇺 RU" if source_region == "ru" else "🌐 GLOBAL"
                                         text = (
                                             f"🔥 **Новый заказ! [{CATEGORIES[cat_code]}] ({reg_badge})**\n\n"
                                             f"📌 **{title}**\n"
