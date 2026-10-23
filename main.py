@@ -26,15 +26,15 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 CATEGORIES = {
-    "design": "🎨 Дизайн",
-    "dev": "💻 Разработка",
-    "text": "✍️ Тексты",
-    "marketing": "📈 Маркетинг"
+    "design": "🎨 Дизайн & UX/UI",
+    "dev": "💻 Разработка & Код",
+    "text": "✍️ Тексты & Копирайтинг",
+    "marketing": "📈 Маркетинг & Трафик"
 }
 
 REGIONS = {
-    "ru": "🇷🇺 Россия",
-    "int": "🌐 Международные"
+    "ru": "🇷🇺 Российские биржи",
+    "int": "🌐 Международные биржи"
 }
 
 RSS_SOURCES = [
@@ -66,37 +66,38 @@ def is_subscription_active(user_id: int) -> bool:
 
 def get_main_reply_keyboard(user_id: int):
     kb = [
-        [KeyboardButton(text="🎛 Фильтры и Регионы"), KeyboardButton(text="🚀 Запустить радар")],
+        [KeyboardButton(text="🎛 Настройка фильтров"), KeyboardButton(text="🚀 Запустить радар")],
         [KeyboardButton(text="💳 Подписка"), KeyboardButton(text="ℹ️ Помощь")]
     ]
     if user_id == ADMIN_ID:
         kb.append([KeyboardButton(text="👑 Админ-панель")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-def get_settings_keyboard(user_id):
-    selected_cats = user_preferences.get(user_id, set())
+# Клавиатура ШАГА 1: Регионы
+def get_regions_keyboard(user_id):
     selected_regs = user_regions.get(user_id, {"ru"})
-    
     buttons = []
     
-    # 1. Выбор регионов
-    reg_row = []
     for code, name in REGIONS.items():
-        icon = "🔘" if code in selected_regs else "⚪️"
-        reg_row.append(InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"reg_{code}"))
-    buttons.append(reg_row)
-    
-    # 2. Выбор категорий (по 2 в ряд)
-    cat_items = list(CATEGORIES.items())
-    for i in range(0, len(cat_items), 2):
-        row = []
-        for code, name in cat_items[i:i+2]:
-            icon = "🔘" if code in selected_cats else "⚪️"
-            row.append(InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"cat_{code}"))
-        buttons.append(row)
+        status = "✅ Включено" if code in selected_regs else "❌ Выключено"
+        buttons.append([InlineKeyboardButton(text=f"{name}: {status}", callback_data=f"step1_reg_{code}")])
         
-    # 3. Кнопка сохранения
-    buttons.append([InlineKeyboardButton(text="🚀 Запустить мониторинг", callback_data="start_radar")])
+    buttons.append([InlineKeyboardButton(text="Далее: Выбор категорий ➡️", callback_data="go_step2")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# Клавиатура ШАГА 2: Категории
+def get_categories_keyboard(user_id):
+    selected_cats = user_preferences.get(user_id, set())
+    buttons = []
+    
+    for code, name in CATEGORIES.items():
+        status = "✅" if code in selected_cats else "❌"
+        buttons.append([InlineKeyboardButton(text=f"{status} {name}", callback_data=f"step2_cat_{code}")])
+        
+    buttons.append([
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="go_step1"),
+        InlineKeyboardButton(text="🚀 Запустить радар", callback_data="start_radar")
+    ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def clean_html(raw_html):
@@ -178,7 +179,7 @@ async def trigger_radar_activation(user_id: int, message_or_callback):
         "🛰 **Как поступают заказы:**\n"
         "• Ниже прислан **последний актуальный проект** с биржи для проверки связи.\n"
         "• Бот сканирует ленты каждые **45 секунд**.\n"
-        "• Заказы отправляются **сразу в момент публикации** заказчиками!"
+        "• Заказы отправляются **сразу в момент публикации**!"
     )
     
     if isinstance(message_or_callback, types.Message):
@@ -203,18 +204,18 @@ async def cmd_start(message: types.Message):
         f"Привет, {message.from_user.first_name}! 👋\n\n"
         f"🤖 **Freelance Radar AI** — ваш персональный агрегатор заказов.\n"
         f"🎁 Пробный период: **3 дня**.\n\n"
-        f"Выберите площадки и категории для отслеживания 👇",
+        f"Давайте настроим регионы и категории задач 👇",
         reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
     await message.answer(
-        "🎛 **Настройка фильтров:**\n\n"
-        "🔘 — включено  |  ⚪️ — выключено",
-        reply_markup=get_settings_keyboard(user_id),
+        "📍 **Шаг 1 из 2: Выберите регионы бирж**\n\n"
+        "Нажмите на кнопку, чтобы включить или отключить поиск:",
+        reply_markup=get_regions_keyboard(user_id),
         parse_mode="Markdown"
     )
 
-@dp.message(F.text.in_(["🎛 Фильтры и Регионы", "🎛 Настройка фильтров", "🎯 Категории & Регионы"]))
+@dp.message(F.text.in_(["🎛 Настройка фильтров", "🎛 Фильтры и Регионы", "🎯 Категории & Регионы"]))
 async def btn_choose_categories(message: types.Message):
     user_id = message.from_user.id
     if user_id not in user_preferences:
@@ -223,9 +224,9 @@ async def btn_choose_categories(message: types.Message):
         user_regions[user_id] = {"ru"}
         
     await message.answer(
-        "🎛 **Настройка фильтров:**\n\n"
-        "🔘 — включено  |  ⚪️ — выключено",
-        reply_markup=get_settings_keyboard(user_id),
+        "📍 **Шаг 1 из 2: Выберите регионы бирж**\n\n"
+        "Нажмите на кнопку, чтобы включить или отключить поиск:",
+        reply_markup=get_regions_keyboard(user_id),
         parse_mode="Markdown"
     )
 
@@ -272,17 +273,18 @@ async def admin_panel(message: types.Message):
 async def btn_help(message: types.Message):
     await message.answer(
         "ℹ️ **Как работает Freelance Radar AI:**\n\n"
-        "1. **Фильтры:** в меню «🎛 Фильтры и Регионы» переключайте тумблеры (🔘/⚪️).\n"
-        "2. **Запуск:** кнопка «🚀 Запустить радар» мгновенно присылает последний проект.\n"
-        "3. **Мониторинг:** бот проверяет ленты каждые 45 секунд и отправляет заказы сразу в момент их публикации.",
+        "1. **Шаг 1:** в настройках выберите регионы бирж (Россия / Международные).\n"
+        "2. **Шаг 2:** укажите сферы работы (Разработка, Дизайн и др.).\n"
+        "3. **Мониторинг:** радар проверяет площадки каждые 45 секунд и отправляет новые заказы мгновенно!",
         reply_markup=get_main_reply_keyboard(message.from_user.id),
         parse_mode="Markdown"
     )
 
-@dp.callback_query(F.data.startswith("reg_"))
-async def process_region(callback: CallbackQuery):
+# Обработка кликов на Шаге 1 (Регионы)
+@dp.callback_query(F.data.startswith("step1_reg_"))
+async def process_region_step1(callback: CallbackQuery):
     user_id = callback.from_user.id
-    reg = callback.data.replace("reg_", "")
+    reg = callback.data.replace("step1_reg_", "")
     if user_id not in user_regions:
         user_regions[user_id] = set()
     if reg in user_regions[user_id]:
@@ -290,26 +292,51 @@ async def process_region(callback: CallbackQuery):
             user_regions[user_id].remove(reg)
             await callback.answer("Регион отключен")
         else:
-            await callback.answer("Нужен хотя бы один регион!", show_alert=True)
+            await callback.answer("Выберите хотя бы один регион!", show_alert=True)
             return
     else:
         user_regions[user_id].add(reg)
-        await callback.answer("Регион добавлен!")
-    await callback.message.edit_reply_markup(reply_markup=get_settings_keyboard(user_id))
+        await callback.answer("Регион включен!")
+    await callback.message.edit_reply_markup(reply_markup=get_regions_keyboard(user_id))
 
-@dp.callback_query(F.data.startswith("cat_"))
-async def process_category(callback: CallbackQuery):
+# Переход к Шагу 2
+@dp.callback_query(F.data == "go_step2")
+async def go_to_step2(callback: CallbackQuery):
     user_id = callback.from_user.id
-    category = callback.data.replace("cat_", "")
+    await callback.message.edit_text(
+        "🎯 **Шаг 2 из 2: Выберите категории задач**\n\n"
+        "Отметьте нужные направления работы:",
+        reply_markup=get_categories_keyboard(user_id),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# Возврат к Шагу 1
+@dp.callback_query(F.data == "go_step1")
+async def go_to_step1(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.message.edit_text(
+        "📍 **Шаг 1 из 2: Выберите регионы бирж**\n\n"
+        "Нажмите на кнопку, чтобы включить или отключить поиск:",
+        reply_markup=get_regions_keyboard(user_id),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# Обработка кликов на Шаге 2 (Категории)
+@dp.callback_query(F.data.startswith("step2_cat_"))
+async def process_category_step2(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    category = callback.data.replace("step2_cat_", "")
     if user_id not in user_preferences:
         user_preferences[user_id] = set()
     if category in user_preferences[user_id]:
         user_preferences[user_id].remove(category)
-        await callback.answer("Категория отключена")
+        await callback.answer("Категория убрана")
     else:
         user_preferences[user_id].add(category)
-        await callback.answer("Категория включена!")
-    await callback.message.edit_reply_markup(reply_markup=get_settings_keyboard(user_id))
+        await callback.answer("Категория добавлена!")
+    await callback.message.edit_reply_markup(reply_markup=get_categories_keyboard(user_id))
 
 @dp.callback_query(F.data == "start_radar")
 async def start_radar_callback(callback: CallbackQuery):
