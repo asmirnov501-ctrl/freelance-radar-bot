@@ -20,8 +20,8 @@ from aiogram.types import (
 
 API_TOKEN = "8849608846:AAGXWPStgM1ClXTQbkONyAneInYk0_mxF3g"
 
-# Укажи свой Telegram ID цифрами, чтобы получить доступ к панели администратора (/admin)
-ADMIN_ID = 0  # <--- Замени на свой реальный Telegram ID (например: 123456789)
+# Твой Telegram ID уже успешно прописан здесь:
+ADMIN_ID = 8188915960  
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -195,7 +195,7 @@ async def admin_broadcast(message: types.Message):
         try:
             await bot.send_message(uid, f"📢 **Сообщение от администратора:**\n\n{text_to_send}", parse_mode="Markdown")
             success_count += 1
-            await asyncio.sleep(0.05) # Защита от флуд-контроля Telegram
+            await asyncio.sleep(0.05)
         except Exception as e:
             logging.error(f"Не удалось отправить рассылку пользователю {uid}: {e}")
             
