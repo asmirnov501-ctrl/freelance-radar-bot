@@ -18,7 +18,7 @@ from aiogram.types import (
     PreCheckoutQuery
 )
 
-API_TOKEN = "8849608846:AAGXWPStgM1ClXTQbkONyAneInYk0_mxF3g"
+API_TOKEN = "8849608846:AAEZTR7xULvxNnfUN7Oz_5rdD0v96XwB3Cs"
 
 # Твой Telegram ID уже успешно прописан здесь:
 ADMIN_ID = 8188915960  
