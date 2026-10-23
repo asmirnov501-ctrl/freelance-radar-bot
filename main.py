@@ -27,16 +27,11 @@ CATEGORIES = {
     "marketing": "📈 Маркетинг & Трафик"
 }
 
-# Расширенный список источников заказов
+# Оставляем стабильный источник Habr Freelance
 RSS_SOURCES = [
     {
         "name": "Habr Freelance",
         "url": "https://freelance.habr.com/tasks.rss",
-        "default_cat": "dev"
-    },
-    {
-        "name": "FL.ru",
-        "url": "https://www.fl.ru/rss/all.xml",
         "default_cat": "dev"
     }
 ]
@@ -180,14 +175,16 @@ def smart_ai_filter(title, summary):
         
     return budget, relevancy
 
-# 🧠 Умный фоновый сканер
+# 🧠 Сканер с подробными логами
 async def real_order_scanner():
     while True:
         try:
+            logging.info("🔄 Запуск проверки RSS-лент...")
             for source in RSS_SOURCES:
                 feed = feedparser.parse(source["url"])
+                logging.info(f"📥 Источник {source['name']}: получено записей: {len(feed.entries)}")
                 
-                for entry in feed.entries[:10]: # Берем последние 10 записей
+                for entry in feed.entries[:5]:
                     order_id = entry.get("id", entry.link)
                     
                     if order_id in sent_orders:
@@ -211,7 +208,7 @@ async def real_order_scanner():
                     budget, relevancy = smart_ai_filter(title, summary)
                     
                     for user_id, categories in user_preferences.items():
-                        # Если пользователь выбрал эту категорию OR если пока не выбрал ни одной (для теста присылаем всё)
+                        # Отправляем, если пользователь выбрал категорию ИЛИ если список категорий у него пустой (для теста)
                         if not categories or cat_code in categories:
                             try:
                                 text = (
@@ -225,17 +222,18 @@ async def real_order_scanner():
                                 
                                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                                     [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=link)]
-                                ])
+                                ]]
                                 
                                 await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
+                                logging.info(f"✅ Отправлен заказ пользователю {user_id}: {title}")
                             except Exception as e:
-                                logging.error(f"Ошибка отправки пользователю {user_id}: {e}")
+                                logging.error(f"❌ Ошибка отправки пользователю {user_id}: {e}")
                                 
                     sent_orders.add(order_id)
         except Exception as e:
-            logging.error(f"Ошибка при парсинге RSS: {e}")
+            logging.error(f"❌ Ошибка при парсинге RSS: {e}")
             
-        await asyncio.sleep(30) # Проверка каждые 30 секунд
+        await asyncio.sleep(20) # Проверка каждые 20 секунд
 
 async def handle(request):
     return web.Response(text="Bot is running!")
