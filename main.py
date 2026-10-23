@@ -27,7 +27,6 @@ CATEGORIES = {
     "marketing": "📈 Маркетинг & Трафик"
 }
 
-# Оставляем стабильный источник Habr Freelance
 RSS_SOURCES = [
     {
         "name": "Habr Freelance",
@@ -175,7 +174,6 @@ def smart_ai_filter(title, summary):
         
     return budget, relevancy
 
-# 🧠 Сканер с подробными логами
 async def real_order_scanner():
     while True:
         try:
@@ -208,7 +206,6 @@ async def real_order_scanner():
                     budget, relevancy = smart_ai_filter(title, summary)
                     
                     for user_id, categories in user_preferences.items():
-                        # Отправляем, если пользователь выбрал категорию ИЛИ если список категорий у него пустой (для теста)
                         if not categories or cat_code in categories:
                             try:
                                 text = (
@@ -220,9 +217,10 @@ async def real_order_scanner():
                                     f"⚡️ *AI-фильтр: Соответствует вашему профилю ({relevancy}% relevancy)*"
                                 )
                                 
+                                # ИСПРАВЛЕННЫЕ СКОБКИ ЗДЕСЬ:
                                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                                     [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=link)]
-                                ]]
+                                ])
                                 
                                 await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
                                 logging.info(f"✅ Отправлен заказ пользователю {user_id}: {title}")
@@ -233,7 +231,7 @@ async def real_order_scanner():
         except Exception as e:
             logging.error(f"❌ Ошибка при парсинге RSS: {e}")
             
-        await asyncio.sleep(20) # Проверка каждые 20 секунд
+        await asyncio.sleep(20)
 
 async def handle(request):
     return web.Response(text="Bot is running!")
