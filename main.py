@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import feedparser
+from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
@@ -11,7 +12,9 @@ from aiogram.types import (
     InlineKeyboardMarkup, 
     CallbackQuery, 
     ReplyKeyboardMarkup, 
-    KeyboardButton
+    KeyboardButton,
+    LabeledPrice,
+    PreCheckoutQuery
 )
 
 API_TOKEN = "8849608846:AAGXWPStgM1ClXTQbkONyAneInYk0_mxF3g"
@@ -37,12 +40,22 @@ RSS_SOURCES = [
 
 sent_orders = set()
 user_preferences = {}
+# Хранение данных подписки: {user_id: datetime окончания}
+user_subscriptions = {}
+
+def is_subscription_active(user_id: int) -> bool:
+    """Проверка, активна ли подписка или триал-период"""
+    if user_id not in user_subscriptions:
+        # Даем 3 дня бесплатного триала при первом обращении
+        user_subscriptions[user_id] = datetime.now() + timedelta(days=3)
+        return True
+    return datetime.now() < user_subscriptions[user_id]
 
 def get_main_reply_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🎯 Выбрать категории"), KeyboardButton(text="🚀 Запустить радар")],
-            [KeyboardButton(text="ℹ️ Помощь")]
+            [KeyboardButton(text="💳 Подписка"), KeyboardButton(text="ℹ️ Помощь")]
         ],
         resize_keyboard=True
     )
@@ -64,9 +77,13 @@ async def cmd_start(message: types.Message):
     if user_id not in user_preferences:
         user_preferences[user_id] = set()
         
+    # Инициализация триала
+    is_subscription_active(user_id)
+    
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
-        f"Я **Freelance Radar AI** — твой умный агрегатор реальных заказов.\n\n"
+        f"Я **Freelance Radar AI** — твой умный агрегатор реальных заказов.\n"
+        f"🎁 Вам активирован **бесплатный пробный период на 3 дня**!\n\n"
         f"Используй кнопки внизу экрана для управления ботом 👇",
         reply_markup=get_main_reply_keyboard(),
         parse_mode="Markdown"
@@ -91,8 +108,17 @@ async def btn_choose_categories(message: types.Message):
 @dp.message(F.text == "🚀 Запустить радар")
 async def btn_start_radar(message: types.Message):
     user_id = message.from_user.id
-    selected = user_preferences.get(user_id, set())
     
+    if not is_subscription_active(user_id):
+        await message.answer(
+            "🔒 **Срок действия вашей подписки истек.**\n\n"
+            "Чтобы продолжать получать заказы в реальном времени, продлите подписку в разделе **💳 Подписка**.",
+            reply_markup=get_main_reply_keyboard(),
+            parse_mode="Markdown"
+        )
+        return
+
+    selected = user_preferences.get(user_id, set())
     if not selected:
         await message.answer("⚠️ Сначала выбери хотя бы одну категорию через кнопку «🎯 Выбрать категории»!")
         return
@@ -106,14 +132,34 @@ async def btn_start_radar(message: types.Message):
         parse_mode="Markdown"
     )
 
+@dp.message(F.text == "💳 Подписка")
+async def btn_subscription(message: types.Message):
+    user_id = message.from_user.id
+    active = is_subscription_active(user_id)
+    until_date = user_subscriptions[user_id].strftime("%d.%m.%Y %H:%M")
+    
+    status_text = f"✅ **Активна** (до `{until_date}`)" if active else "❌ **Истекла**"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ Продлить за 150 Stars (1 мес.)", callback_data="buy_stars")]
+    ])
+    
+    await message.answer(
+        f"💳 **Управление подпиской**\n\n"
+        f"• **Статус:** {status_text}\n\n"
+        f"Подписка дает безлимитный доступ к автоматическому мониторингу заказов со всех бирж и каналов с AI-фильтрацией.",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
 @dp.message(F.text == "ℹ️ Помощь")
 async def btn_help(message: types.Message):
     await message.answer(
         "ℹ️ **Как работает Freelance Radar AI:**\n\n"
         "1. Нажми «🎯 Выбрать категории» и отметь нужные направления.\n"
         "2. Нажми «🚀 Запустить радар».\n"
-        "3. Бот анализирует заказы через локальный AI-фильтр и присылает только подходящие проекты с прямой ссылкой.\n\n"
-        "Первые 3 дня доступа — **БЕСПЛАТНО**!",
+        "3. Бот анализирует заказы через локальный AI-фильтр и присылает только подходящие проекты.\n\n"
+        "🎁 Первые 3 дня доступа — **БЕСПЛАТНО**!",
         reply_markup=get_main_reply_keyboard(),
         parse_mode="Markdown"
     )
@@ -138,8 +184,12 @@ async def process_category(callback: CallbackQuery):
 @dp.callback_query(F.data == "start_radar")
 async def start_radar_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
-    selected = user_preferences.get(user_id, set())
     
+    if not is_subscription_active(user_id):
+        await callback.answer("🔒 Подписка истекла. Продлите доступ!", show_alert=True)
+        return
+
+    selected = user_preferences.get(user_id, set())
     if not selected:
         await callback.answer("⚠️ Выберите хотя бы одну категорию!", show_alert=True)
         return
@@ -150,6 +200,43 @@ async def start_radar_callback(callback: CallbackQuery):
         f"🚀 **Радар успешно запущен!**\n\n"
         f"**Выбранные категории:**\n{selected_names}\n\n"
         f"🌐 Мониторинг бирж и каналов активен. Ожидайте свежие проекты...",
+        reply_markup=get_main_reply_keyboard(),
+        parse_mode="Markdown"
+    )
+
+# Обработка инвойса Telegram Stars
+@dp.callback_query(F.data == "buy_stars")
+async def send_stars_invoice(callback: CallbackQuery):
+    prices = [LabeledPrice(label="Подписка на 1 месяц", amount=150)] # 150 Telegram Stars
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="Freelance Radar AI — PRO подписка",
+        description="Доступ к агрегатору заказов в реальном времени на 30 дней",
+        payload="sub_30_days",
+        provider_token="", # Для Telegram Stars оставляет пустым
+        currency="XTR", # Код валюты Telegram Stars
+        prices=prices
+    )
+    await callback.answer()
+
+@dp.pre_checkout_query()
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@dp.message(F.successful_payment)
+async def process_successful_payment(message: types.Message):
+    user_id = message.from_user.id
+    current_end = user_subscriptions.get(user_id, datetime.now())
+    if current_end < datetime.now():
+        current_end = datetime.now()
+        
+    user_subscriptions[user_id] = current_end + timedelta(days=30)
+    
+    until_date = user_subscriptions[user_id].strftime("%d.%m.%Y")
+    await message.answer(
+        f"🎉 **Оплата прошла успешно!**\n\n"
+        f"Ваша подписка продлена на 30 дней (до `{until_date}`).\n"
+        f"Спасибо за поддержку проекта!",
         reply_markup=get_main_reply_keyboard(),
         parse_mode="Markdown"
     )
@@ -174,13 +261,12 @@ def smart_ai_filter(title, summary):
         
     return budget, relevancy
 
+# 🧠 Сканер (рассылает только пользователям с активной подпиской)
 async def real_order_scanner():
     while True:
         try:
-            logging.info("🔄 Запуск проверки RSS-лент...")
             for source in RSS_SOURCES:
                 feed = feedparser.parse(source["url"])
-                logging.info(f"📥 Источник {source['name']}: получено записей: {len(feed.entries)}")
                 
                 for entry in feed.entries[:5]:
                     order_id = entry.get("id", entry.link)
@@ -206,30 +292,30 @@ async def real_order_scanner():
                     budget, relevancy = smart_ai_filter(title, summary)
                     
                     for user_id, categories in user_preferences.items():
-                        if not categories or cat_code in categories:
-                            try:
-                                text = (
-                                    f"🔥 **Новый заказ! [{CATEGORIES[cat_code]}]**\n\n"
-                                    f"📌 **{title}**\n"
-                                    f"💰 **Бюджет:** `{budget}`\n"
-                                    f"🌐 **Источник:** `{source['name']}`\n\n"
-                                    f"📝 {summary}\n\n"
-                                    f"⚡️ *AI-фильтр: Соответствует вашему профилю ({relevancy}% relevancy)*"
-                                )
-                                
-                                # ИСПРАВЛЕННЫЕ СКОБКИ ЗДЕСЬ:
-                                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                                    [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=link)]
-                                ])
-                                
-                                await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
-                                logging.info(f"✅ Отправлен заказ пользователю {user_id}: {title}")
-                            except Exception as e:
-                                logging.error(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+                        # Проверяем активна ли подписка у пользователя
+                        if is_subscription_active(user_id):
+                            if not categories or cat_code in categories:
+                                try:
+                                    text = (
+                                        f"🔥 **Новый заказ! [{CATEGORIES[cat_code]}]**\n\n"
+                                        f"📌 **{title}**\n"
+                                        f"💰 **Бюджет:** `{budget}`\n"
+                                        f"🌐 **Источник:** `{source['name']}`\n\n"
+                                        f"📝 {summary}\n\n"
+                                        f"⚡️ *AI-фильтр: Соответствует вашему профилю ({relevancy}% relevancy)*"
+                                    )
+                                    
+                                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                                        [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=link)]
+                                    ])
+                                    
+                                    await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
+                                except Exception as e:
+                                    logging.error(f"Ошибка отправки пользователю {user_id}: {e}")
                                 
                     sent_orders.add(order_id)
         except Exception as e:
-            logging.error(f"❌ Ошибка при парсинге RSS: {e}")
+            logging.error(f"Ошибка при парсинге RSS: {e}")
             
         await asyncio.sleep(20)
 
