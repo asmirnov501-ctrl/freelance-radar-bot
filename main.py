@@ -120,7 +120,6 @@ async def fetch_rss_feed(url):
     return None
 
 async def send_latest_order_immediately(user_id: int):
-    """Отправляет один последний релевантный заказ сразу при запуске радара"""
     user_cats = user_preferences.get(user_id, set())
     user_regs = user_regions.get(user_id, {"ru"})
     
@@ -173,9 +172,9 @@ async def trigger_radar_activation(user_id: int, message_or_callback):
     text_success = (
         "🚀 **Радар успешно запущен!**\n\n"
         "🛰 **Как поступают заказы:**\n"
-        "• Ниже прислали **последний опубликованный проект** с биржи.\n"
-        "• Бот сканирует ленты каждые 45 секунд.\n"
-        "• Как только заказчик опубликует новый проект, вы сразу получите уведомление!"
+        "• Ниже прислан **последний актуальный проект** с биржи для проверки связи.\n"
+        "• Бот сканирует ленты в фоновом режиме каждые **45 секунд**.\n"
+        "• Новые проекты не появляются каждую секунду — они приходят **ровно в момент их публикации** заказчиками!"
     )
     
     if isinstance(message_or_callback, types.Message):
@@ -198,9 +197,13 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
-        f"🤖 **Freelance Radar AI** активирован.\n"
-        f"🎁 Пробный период: **3 дня**.\n\n"
-        f"Выбери нужные параметры в панели ниже 👇",
+        f"🤖 **Freelance Radar AI** — ваш персональный агрегатор заказов.\n\n"
+        f"📌 **Что умеет бот:**\n"
+        f"• Собирает заказы с 🇷🇺 **российских** и 🌍 **зарубежных** бирж.\n"
+        f"• Сканирует ленты каждые **45 секунд** в реальном времени.\n"
+        f"• Анализирует бюджет и фильтрует проекты по вашим категориям.\n\n"
+        f"🎁 Активирован **пробный период на 3 дня**!\n\n"
+        f"Настройте фильтры в панели ниже 👇",
         reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
@@ -265,7 +268,15 @@ async def admin_panel(message: types.Message):
 
 @dp.message(F.text == "ℹ️ Помощь")
 async def btn_help(message: types.Message):
-    await message.answer("ℹ️ Выберите регионы и категории в панели управления, затем запустите радар.", reply_markup=get_main_reply_keyboard(message.from_user.id))
+    await message.answer(
+        "ℹ️ **Как работает Freelance Radar AI:**\n\n"
+        "1. **Настройка фильтров:** в меню «🎛 Настройка фильтров» выберите регионы (🇷🇺 Россия / 🌍 Зарубеж) и нужные категории.\n"
+        "2. **Запуск радара:** по нажатию «🚀 Запустить радар» бот мгновенно присылает последний проект с биржи для проверки связи.\n"
+        "3. **Реальное время:** бот проверяет ленты каждые 45 секунд. Заказы не сыплются непрерывным потоком, а приходят ровно в момент их публикации заказчиками на биржах!\n\n"
+        "⚡️ Каждый проект проходит AI-анализ бюджета и содержит прямую ссылку на отклик.",
+        reply_markup=get_main_reply_keyboard(message.from_user.id),
+        parse_mode="Markdown"
+    )
 
 @dp.callback_query(F.data.startswith("reg_"))
 async def process_region(callback: CallbackQuery):
