@@ -27,10 +27,16 @@ CATEGORIES = {
     "marketing": "📈 Маркетинг & Трафик"
 }
 
+# Расширенный список источников заказов
 RSS_SOURCES = [
     {
         "name": "Habr Freelance",
         "url": "https://freelance.habr.com/tasks.rss",
+        "default_cat": "dev"
+    },
+    {
+        "name": "FL.ru",
+        "url": "https://www.fl.ru/rss/all.xml",
         "default_cat": "dev"
     }
 ]
@@ -160,32 +166,28 @@ def clean_html(raw_html):
     return cleantext.strip()[:250] + "..." if len(cleantext) > 250 else cleantext.strip()
 
 def smart_ai_filter(title, summary):
-    """Локальный умный анализатор бюджета и релевантности"""
     full_text = (title + " " + summary).lower()
-    
-    # Поиск бюджета с помощью регулярных выражений
     budget_match = re.search(r'(\d+[\s\d]*)\s?(руб|₽|\$|usd|тыс|р\.)', full_text)
     budget = budget_match.group(0).upper() if budget_match else "По договоренности"
     
-    # Расчет условного процента релевантности на основе наполненности
-    relevancy = 85
+    relevancy = 88
     if len(summary) > 50:
-        relevancy += 10
+        relevancy += 7
     if budget != "По договоренности":
-        relevancy += 4
-    if relevancy > 99:
+        relevancy += 3
+    if relevancy > 98:
         relevancy = 98
         
     return budget, relevancy
 
-# 🧠 Умный фоновый сканер с локальным фильтром
+# 🧠 Умный фоновый сканер
 async def real_order_scanner():
     while True:
         try:
             for source in RSS_SOURCES:
                 feed = feedparser.parse(source["url"])
                 
-                for entry in feed.entries[:5]:
+                for entry in feed.entries[:10]: # Берем последние 10 записей
                     order_id = entry.get("id", entry.link)
                     
                     if order_id in sent_orders:
@@ -195,23 +197,22 @@ async def real_order_scanner():
                     link = entry.link
                     summary = clean_html(entry.get("summary", "Описание отсутствует"))
                     
-                    # Определение категории по ключевым словам
                     cat_code = source["default_cat"]
                     title_lower = title.lower()
-                    if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "сайт", "верстка"]):
+                    if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка"]):
                         cat_code = "design"
                     elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод"]):
                         cat_code = "text"
                     elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид"]):
                         cat_code = "marketing"
-                    elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист"]):
+                    elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "разработка"]):
                         cat_code = "dev"
 
-                    # Применяем локальный AI-анализ
                     budget, relevancy = smart_ai_filter(title, summary)
                     
                     for user_id, categories in user_preferences.items():
-                        if cat_code in categories:
+                        # Если пользователь выбрал эту категорию OR если пока не выбрал ни одной (для теста присылаем всё)
+                        if not categories or cat_code in categories:
                             try:
                                 text = (
                                     f"🔥 **Новый заказ! [{CATEGORIES[cat_code]}]**\n\n"
@@ -234,7 +235,7 @@ async def real_order_scanner():
         except Exception as e:
             logging.error(f"Ошибка при парсинге RSS: {e}")
             
-        await asyncio.sleep(60)
+        await asyncio.sleep(30) # Проверка каждые 30 секунд
 
 async def handle(request):
     return web.Response(text="Bot is running!")
