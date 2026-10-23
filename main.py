@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import aiohttp
 import feedparser
 from datetime import datetime, timedelta
 from aiohttp import web
@@ -30,23 +31,27 @@ CATEGORIES = {
     "marketing": "📈 Маркетинг & Трафик"
 }
 
+# Список источников с защитой от блокировок
 RSS_SOURCES = [
     {
         "name": "Habr Freelance",
         "url": "https://freelance.habr.com/tasks.rss",
+        "default_cat": "dev"
+    },
+    {
+        "name": "FL.ru",
+        "url": "https://www.fl.ru/rss/all.xml",
         "default_cat": "dev"
     }
 ]
 
 sent_orders = set()
 user_preferences = {}
-# Хранение данных подписки: {user_id: datetime окончания}
 user_subscriptions = {}
 
 def is_subscription_active(user_id: int) -> bool:
-    """Проверка, активна ли подписка или триал-период"""
+    """Проверка активности подписки или триала (3 дня)"""
     if user_id not in user_subscriptions:
-        # Даем 3 дня бесплатного триала при первом обращении
         user_subscriptions[user_id] = datetime.now() + timedelta(days=3)
         return True
     return datetime.now() < user_subscriptions[user_id]
@@ -77,7 +82,6 @@ async def cmd_start(message: types.Message):
     if user_id not in user_preferences:
         user_preferences[user_id] = set()
         
-    # Инициализация триала
     is_subscription_active(user_id)
     
     await message.answer(
@@ -112,7 +116,7 @@ async def btn_start_radar(message: types.Message):
     if not is_subscription_active(user_id):
         await message.answer(
             "🔒 **Срок действия вашей подписки истек.**\n\n"
-            "Чтобы продолжать получать заказы в реальном времени, продлите подписку в разделе **💳 Подписка**.",
+            "Чтобы продолжать получать заказы, продлите подписку в разделе **💳 Подписка**.",
             reply_markup=get_main_reply_keyboard(),
             parse_mode="Markdown"
         )
@@ -141,13 +145,13 @@ async def btn_subscription(message: types.Message):
     status_text = f"✅ **Активна** (до `{until_date}`)" if active else "❌ **Истекла**"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐ Продлить за 150 Stars (1 мес.)", callback_data="buy_stars")]
+        [InlineKeyboardButton(text="⭐ Продлить за 333 Stars (1 мес.)", callback_data="buy_stars")]
     ])
     
     await message.answer(
         f"💳 **Управление подпиской**\n\n"
         f"• **Статус:** {status_text}\n\n"
-        f"Подписка дает безлимитный доступ к автоматическому мониторингу заказов со всех бирж и каналов с AI-фильтрацией.",
+        f"PRO-подписка дает безлимитный доступ к автоматическому мониторингу заказов со всех бирж с AI-фильтрацией.",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
@@ -158,7 +162,7 @@ async def btn_help(message: types.Message):
         "ℹ️ **Как работает Freelance Radar AI:**\n\n"
         "1. Нажми «🎯 Выбрать категории» и отметь нужные направления.\n"
         "2. Нажми «🚀 Запустить радар».\n"
-        "3. Бот анализирует заказы через локальный AI-фильтр и присылает только подходящие проекты.\n\n"
+        "3. Бот анализирует заказы через AI-фильтр и присылает только подходящие проекты с прямой ссылкой.\n\n"
         "🎁 Первые 3 дня доступа — **БЕСПЛАТНО**!",
         reply_markup=get_main_reply_keyboard(),
         parse_mode="Markdown"
@@ -199,22 +203,22 @@ async def start_radar_callback(callback: CallbackQuery):
     await callback.message.answer(
         f"🚀 **Радар успешно запущен!**\n\n"
         f"**Выбранные категории:**\n{selected_names}\n\n"
-        f"🌐 Мониторинг бирж и каналов активен. Ожидайте свежие проекты...",
+        f"🌐 Мониторинг бирж активен. Ожидайте свежие проекты...",
         reply_markup=get_main_reply_keyboard(),
         parse_mode="Markdown"
     )
 
-# Обработка инвойса Telegram Stars
+# Обновленный инвойс на 333 Telegram Stars
 @dp.callback_query(F.data == "buy_stars")
 async def send_stars_invoice(callback: CallbackQuery):
-    prices = [LabeledPrice(label="Подписка на 1 месяц", amount=150)] # 150 Telegram Stars
+    prices = [LabeledPrice(label="PRO Подписка на 1 месяц", amount=333)] # 333 Telegram Stars
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Freelance Radar AI — PRO подписка",
-        description="Доступ к агрегатору заказов в реальном времени на 30 дней",
+        description="Безлимитный доступ к агрегатору заказов на 30 дней",
         payload="sub_30_days",
-        provider_token="", # Для Telegram Stars оставляет пустым
-        currency="XTR", # Код валюты Telegram Stars
+        provider_token="",
+        currency="XTR",
         prices=prices
     )
     await callback.answer()
@@ -261,12 +265,27 @@ def smart_ai_filter(title, summary):
         
     return budget, relevancy
 
-# 🧠 Сканер (рассылает только пользователям с активной подпиской)
+async def fetch_rss_feed(url):
+    """Асинхронная загрузка RSS с подделкои браузера для защиты от блокировок"""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    return feedparser.parse(text)
+    except Exception as e:
+        logging.error(f"Ошибка загрузки ленты {url}: {e}")
+    return None
+
+# 🧠 Умный сканер нескольких бирж
 async def real_order_scanner():
     while True:
         try:
             for source in RSS_SOURCES:
-                feed = feedparser.parse(source["url"])
+                feed = await fetch_rss_feed(source["url"])
+                if not feed or not hasattr(feed, "entries"):
+                    continue
                 
                 for entry in feed.entries[:5]:
                     order_id = entry.get("id", entry.link)
@@ -292,7 +311,6 @@ async def real_order_scanner():
                     budget, relevancy = smart_ai_filter(title, summary)
                     
                     for user_id, categories in user_preferences.items():
-                        # Проверяем активна ли подписка у пользователя
                         if is_subscription_active(user_id):
                             if not categories or cat_code in categories:
                                 try:
@@ -315,9 +333,9 @@ async def real_order_scanner():
                                 
                     sent_orders.add(order_id)
         except Exception as e:
-            logging.error(f"Ошибка при парсинге RSS: {e}")
+            logging.error(f"Ошибка в сканере заказов: {e}")
             
-        await asyncio.sleep(20)
+        await asyncio.sleep(30)
 
 async def handle(request):
     return web.Response(text="Bot is running!")
