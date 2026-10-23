@@ -27,18 +27,17 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 CATEGORIES = {
-    "design": "🎨 Дизайн & UX/UI",
-    "dev": "💻 Разработка & Код",
-    "text": "✍️ Тексты & Копирайтинг",
-    "marketing": "📈 Маркетинг & Трафик"
+    "design": "🎨 Дизайн",
+    "dev": "💻 Разработка",
+    "text": "✍️ Тексты",
+    "marketing": "📈 Маркетинг"
 }
 
 REGIONS = {
-    "ru": "🇷🇺 Российские биржи",
-    "int": "🌍 Иностранные биржи"
+    "ru": "🇷🇺 Россия",
+    "int": "🌍 Зарубеж"
 }
 
-# Надежные источники с разделением
 RSS_SOURCES = [
     {
         "name": "Habr Freelance",
@@ -68,7 +67,7 @@ def is_subscription_active(user_id: int) -> bool:
 
 def get_main_reply_keyboard(user_id: int):
     kb = [
-        [KeyboardButton(text="🎯 Категории & Регионы"), KeyboardButton(text="🚀 Запустить радар")],
+        [KeyboardButton(text="🎛 Настройка фильтров"), KeyboardButton(text="🚀 Запустить радар")],
         [KeyboardButton(text="💳 Подписка"), KeyboardButton(text="ℹ️ Помощь")]
     ]
     if user_id == ADMIN_ID:
@@ -80,17 +79,26 @@ def get_settings_keyboard(user_id):
     selected_regs = user_regions.get(user_id, {"ru"})
     
     buttons = []
-    buttons.append([InlineKeyboardButton(text="--- 🌐 РЕГИОНЫ ---", callback_data="noop")])
+    
+    # 1. Регионы в ряд (2 колонки)
+    reg_row = []
     for code, name in REGIONS.items():
-        prefix = "✅ " if code in selected_regs else "▫️ "
-        buttons.append([InlineKeyboardButton(text=f"{prefix}{name}", callback_data=f"reg_{code}")])
+        icon = "🟢" if code in selected_regs else "⚪️"
+        reg_row.append(InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"reg_{code}"))
+    buttons.append(reg_row)
+    
+    # 2. Категории по 2 в ряд
+    cat_items = list(CATEGORIES.items())
+    for i in range(0, len(cat_items), 2):
+        row = []
+        for code, name in cat_items[i:i+2]:
+            icon = "✅" if code in selected_cats else "❌"
+            row.append(InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"cat_{code}"))
+        buttons.append(row)
         
-    buttons.append([InlineKeyboardButton(text="--- 🎯 КАТЕГОРИИ ---", callback_data="noop")])
-    for code, name in CATEGORIES.items():
-        prefix = "✅ " if code in selected_cats else "▫️ "
-        buttons.append([InlineKeyboardButton(text=f"{prefix}{name}", callback_data=f"cat_{code}")])
-        
-    buttons.append([InlineKeyboardButton(text="🚀 Готово / Запустить", callback_data="start_radar")])
+    # 3. Кнопка запуска внизу
+    buttons.append([InlineKeyboardButton(text="🚀 Сохранить и запустить радар", callback_data="start_radar")])
+    
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @dp.message(CommandStart())
@@ -105,19 +113,19 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
-        f"Я **Freelance Radar AI** — умный агрегатор заказов.\n"
-        f"🎁 Активирован **пробный период на 3 дня**!\n\n"
-        f"Настройте параметры ниже 👇",
+        f"🤖 **Freelance Radar AI** активирован.\n"
+        f"🎁 Пробный период: **3 дня**.\n\n"
+        f"Выбери нужные параметры в панели ниже 👇",
         reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
     await message.answer(
-        "⚙️ **Настройки фильтрации:**",
+        "🎛 **Панель управления фильтрами:**",
         reply_markup=get_settings_keyboard(user_id),
         parse_mode="Markdown"
     )
 
-@dp.message(F.text.in_(["🎯 Категории & Регионы", "🎯 Выбрать категории"]))
+@dp.message(F.text.in_(["🎛 Настройка фильтров", "🎯 Категории & Регионы", "🎯 Выбрать категории"]))
 async def btn_choose_categories(message: types.Message):
     user_id = message.from_user.id
     if user_id not in user_preferences:
@@ -126,7 +134,7 @@ async def btn_choose_categories(message: types.Message):
         user_regions[user_id] = {"ru"}
         
     await message.answer(
-        "⚙️ **Настройка категорий и регионов:**",
+        "🎛 **Панель управления фильтрами:**",
         reply_markup=get_settings_keyboard(user_id),
         parse_mode="Markdown"
     )
@@ -148,7 +156,7 @@ async def test_order_handler(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     text = (
-        f"🔥 **Новый заказ! [💻 Разработка & Код] (🇷🇺 RU)**\n\n"
+        f"🔥 **Новый заказ! [💻 Разработка] (🇷🇺 RU)**\n\n"
         f"📌 **Тестовый проект: Разработка Telegram-бота на Python**\n"
         f"💰 **Бюджет:** `50 000 ₽`\n"
         f"🌐 **Источник:** `Habr Freelance (Тест)`\n\n"
@@ -180,11 +188,7 @@ async def admin_panel(message: types.Message):
 
 @dp.message(F.text == "ℹ️ Помощь")
 async def btn_help(message: types.Message):
-    await message.answer("ℹ️ Выберите регионы и категории, затем запустите радар.", reply_markup=get_main_reply_keyboard(message.from_user.id))
-
-@dp.callback_query(F.data == "noop")
-async def noop_callback(callback: CallbackQuery):
-    await callback.answer()
+    await message.answer("ℹ️ Выберите регионы и категории в панели управления, затем запустите радар.", reply_markup=get_main_reply_keyboard(message.from_user.id))
 
 @dp.callback_query(F.data.startswith("reg_"))
 async def process_region(callback: CallbackQuery):
@@ -220,7 +224,7 @@ async def process_category(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "start_radar")
 async def start_radar_callback(callback: CallbackQuery):
-    await callback.message.answer("🚀 Радар успешно запущен!", reply_markup=get_main_reply_keyboard(callback.from_user.id))
+    await callback.message.answer("🚀 Радар успешно запущен! Мониторинг настроен.", reply_markup=get_main_reply_keyboard(callback.from_user.id))
     await callback.answer()
 
 @dp.callback_query(F.data == "buy_stars")
@@ -347,6 +351,8 @@ async def web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    while True:
+        await asyncio.sleep(3600)
 
 async def main():
     asyncio.create_task(web_server())
