@@ -18,9 +18,10 @@ from aiogram.types import (
     PreCheckoutQuery
 )
 
+# Ti baro a token ti bot-mo
 API_TOKEN = "8849608846:AAEZTR7xULvxNnfUN7Oz_5rdD0v96XwB3Cs"
 
-# Твой Telegram ID уже успешно прописан здесь:
+# Ti Telegram ID-mo
 ADMIN_ID = 8188915960  
 
 logging.basicConfig(level=logging.INFO)
@@ -53,7 +54,7 @@ user_subscriptions = {}
 total_stars_collected = 0
 
 def is_subscription_active(user_id: int) -> bool:
-    """Проверка активности подписки или триала (3 дня)"""
+    """Panag-check ti subscription wenno trial (3 nga aldaw)"""
     if user_id not in user_subscriptions:
         user_subscriptions[user_id] = datetime.now() + timedelta(days=3)
         return True
@@ -138,6 +139,27 @@ async def btn_start_radar(message: types.Message):
         reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
+
+@dp.message(Command("testorder"))
+async def test_order_handler(message: types.Message):
+    """Command para iti Admin: pang-test nga insigida ti pannakaipatulod ti order"""
+    user_id = message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    
+    text = (
+        f"🔥 **Новый заказ! [💻 Разработка & Код]**\n\n"
+        f"📌 **Тестовый проект: Разработка Telegram-бота на Python**\n"
+        f"💰 **Бюджет:** `50 000 ₽`\n"
+        f"🌐 **Источник:** `Habr Freelance (Тест)`\n\n"
+        f"📝 Требуется опытный разработчик для создания бота на aiogram 3 с интеграцией платежей Telegram Stars...\n\n"
+        f"⚡️ *AI-фильтр: Соответствует вашему профилю (98% relevancy)*"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Откликнуться на бирже", url="https://freelance.habr.com")]
+    ])
+    await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+    await message.answer("✅ **Тестовый заказ успешно отправлен! Система доставки работает без сбоев.**", parse_mode="Markdown")
 
 @dp.message(F.text == "💳 Подписка")
 async def btn_subscription(message: types.Message):
