@@ -7,7 +7,7 @@ import feedparser
 from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     InlineKeyboardButton, 
     InlineKeyboardMarkup, 
@@ -20,6 +20,9 @@ from aiogram.types import (
 
 API_TOKEN = "8849608846:AAGXWPStgM1ClXTQbkONyAneInYk0_mxF3g"
 
+# Укажи свой Telegram ID цифрами, чтобы получить доступ к панели администратора (/admin)
+ADMIN_ID = 0  # <--- Замени на свой реальный Telegram ID (например: 123456789)
+
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -31,7 +34,6 @@ CATEGORIES = {
     "marketing": "📈 Маркетинг & Трафик"
 }
 
-# Список источников с защитой от блокировок
 RSS_SOURCES = [
     {
         "name": "Habr Freelance",
@@ -48,6 +50,7 @@ RSS_SOURCES = [
 sent_orders = set()
 user_preferences = {}
 user_subscriptions = {}
+total_stars_collected = 0
 
 def is_subscription_active(user_id: int) -> bool:
     """Проверка активности подписки или триала (3 дня)"""
@@ -56,14 +59,14 @@ def is_subscription_active(user_id: int) -> bool:
         return True
     return datetime.now() < user_subscriptions[user_id]
 
-def get_main_reply_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🎯 Выбрать категории"), KeyboardButton(text="🚀 Запустить радар")],
-            [KeyboardButton(text="💳 Подписка"), KeyboardButton(text="ℹ️ Помощь")]
-        ],
-        resize_keyboard=True
-    )
+def get_main_reply_keyboard(user_id: int):
+    kb = [
+        [KeyboardButton(text="🎯 Выбрать категории"), KeyboardButton(text="🚀 Запустить радар")],
+        [KeyboardButton(text="💳 Подписка"), KeyboardButton(text="ℹ️ Помощь")]
+    ]
+    if user_id == ADMIN_ID:
+        kb.append([KeyboardButton(text="👑 Админ-панель")])
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_categories_keyboard(user_id):
     selected = user_preferences.get(user_id, set())
@@ -89,7 +92,7 @@ async def cmd_start(message: types.Message):
         f"Я **Freelance Radar AI** — твой умный агрегатор реальных заказов.\n"
         f"🎁 Вам активирован **бесплатный пробный период на 3 дня**!\n\n"
         f"Используй кнопки внизу экрана для управления ботом 👇",
-        reply_markup=get_main_reply_keyboard(),
+        reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
     await message.answer(
@@ -117,7 +120,7 @@ async def btn_start_radar(message: types.Message):
         await message.answer(
             "🔒 **Срок действия вашей подписки истек.**\n\n"
             "Чтобы продолжать получать заказы, продлите подписку в разделе **💳 Подписка**.",
-            reply_markup=get_main_reply_keyboard(),
+            reply_markup=get_main_reply_keyboard(user_id),
             parse_mode="Markdown"
         )
         return
@@ -132,7 +135,7 @@ async def btn_start_radar(message: types.Message):
         f"🚀 **Радар успешно запущен!**\n\n"
         f"**Выбранные категории:**\n{selected_names}\n\n"
         f"🌐 Мониторинг бирж активен. Ожидай свежие проекты...",
-        reply_markup=get_main_reply_keyboard(),
+        reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
 
@@ -156,15 +159,58 @@ async def btn_subscription(message: types.Message):
         parse_mode="Markdown"
     )
 
+@dp.message(F.text == "👑 Админ-панель")
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    user_id = message.from_user.id
+    if user_id != ADMIN_ID:
+        await message.answer("⛔ У вас нет доступа к этой команде.")
+        return
+        
+    total_users = len(user_preferences)
+    active_subs = sum(1 for uid in user_preferences if is_subscription_active(uid))
+    
+    await message.answer(
+        f"👑 **Панель администратора**\n\n"
+        f"👥 **Всего пользователей:** `{total_users}`\n"
+        f"💎 **Активных подписок/триалов:** `{active_subs}`\n"
+        f"⭐ **Собрано звезд:** `{total_stars_collected}` XTR\n\n"
+        f"Используйте команду `/broadcast Текст сообщения` для отправки рассылки всем пользователям.",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("broadcast"))
+async def admin_broadcast(message: types.Message):
+    user_id = message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+        
+    text_to_send = message.text.replace("/broadcast", "").strip()
+    if not text_to_send:
+        await message.answer("⚠️ Укажите текст рассылки после команды, например:\n`/broadcast Важное обновление системы!`", parse_mode="Markdown")
+        return
+        
+    success_count = 0
+    for uid in user_preferences.keys():
+        try:
+            await bot.send_message(uid, f"📢 **Сообщение от администратора:**\n\n{text_to_send}", parse_mode="Markdown")
+            success_count += 1
+            await asyncio.sleep(0.05) # Защита от флуд-контроля Telegram
+        except Exception as e:
+            logging.error(f"Не удалось отправить рассылку пользователю {uid}: {e}")
+            
+    await message.answer(f"✅ Рассылка успешно завершена. Доставлено пользователям: {success_count}/{len(user_preferences)}")
+
 @dp.message(F.text == "ℹ️ Помощь")
 async def btn_help(message: types.Message):
+    user_id = message.from_user.id
     await message.answer(
         "ℹ️ **Как работает Freelance Radar AI:**\n\n"
         "1. Нажми «🎯 Выбрать категории» и отметь нужные направления.\n"
         "2. Нажми «🚀 Запустить радар».\n"
         "3. Бот анализирует заказы через AI-фильтр и присылает только подходящие проекты с прямой ссылкой.\n\n"
         "🎁 Первые 3 дня доступа — **БЕСПЛАТНО**!",
-        reply_markup=get_main_reply_keyboard(),
+        reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
 
@@ -204,14 +250,13 @@ async def start_radar_callback(callback: CallbackQuery):
         f"🚀 **Радар успешно запущен!**\n\n"
         f"**Выбранные категории:**\n{selected_names}\n\n"
         f"🌐 Мониторинг бирж активен. Ожидайте свежие проекты...",
-        reply_markup=get_main_reply_keyboard(),
+        reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
 
-# Обновленный инвойс на 333 Telegram Stars
 @dp.callback_query(F.data == "buy_stars")
 async def send_stars_invoice(callback: CallbackQuery):
-    prices = [LabeledPrice(label="PRO Подписка на 1 месяц", amount=333)] # 333 Telegram Stars
+    prices = [LabeledPrice(label="PRO Подписка на 1 месяц", amount=333)]
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Freelance Radar AI — PRO подписка",
@@ -229,7 +274,10 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: types.Message):
+    global total_stars_collected
     user_id = message.from_user.id
+    total_stars_collected += 333
+    
     current_end = user_subscriptions.get(user_id, datetime.now())
     if current_end < datetime.now():
         current_end = datetime.now()
@@ -241,7 +289,7 @@ async def process_successful_payment(message: types.Message):
         f"🎉 **Оплата прошла успешно!**\n\n"
         f"Ваша подписка продлена на 30 дней (до `{until_date}`).\n"
         f"Спасибо за поддержку проекта!",
-        reply_markup=get_main_reply_keyboard(),
+        reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
 
@@ -266,7 +314,6 @@ def smart_ai_filter(title, summary):
     return budget, relevancy
 
 async def fetch_rss_feed(url):
-    """Асинхронная загрузка RSS с подделкои браузера для защиты от блокировок"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         async with aiohttp.ClientSession() as session:
@@ -278,7 +325,6 @@ async def fetch_rss_feed(url):
         logging.error(f"Ошибка загрузки ленты {url}: {e}")
     return None
 
-# 🧠 Умный сканер нескольких бирж
 async def real_order_scanner():
     while True:
         try:
