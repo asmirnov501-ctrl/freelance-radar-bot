@@ -34,7 +34,7 @@ CATEGORIES = {
 
 REGIONS = {
     "ru": "🇷🇺 Россия",
-    "int": "🌍 Зарубеж"
+    "int": "🌐 Международные"
 }
 
 RSS_SOURCES = [
@@ -66,7 +66,7 @@ def is_subscription_active(user_id: int) -> bool:
 
 def get_main_reply_keyboard(user_id: int):
     kb = [
-        [KeyboardButton(text="🎛 Настройка фильтров"), KeyboardButton(text="🚀 Запустить радар")],
+        [KeyboardButton(text="🎛 Фильтры и Регионы"), KeyboardButton(text="🚀 Запустить радар")],
         [KeyboardButton(text="💳 Подписка"), KeyboardButton(text="ℹ️ Помощь")]
     ]
     if user_id == ADMIN_ID:
@@ -78,21 +78,25 @@ def get_settings_keyboard(user_id):
     selected_regs = user_regions.get(user_id, {"ru"})
     
     buttons = []
+    
+    # 1. Выбор регионов
     reg_row = []
     for code, name in REGIONS.items():
-        icon = "🟢" if code in selected_regs else "⚪️"
+        icon = "🔘" if code in selected_regs else "⚪️"
         reg_row.append(InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"reg_{code}"))
     buttons.append(reg_row)
     
+    # 2. Выбор категорий (по 2 в ряд)
     cat_items = list(CATEGORIES.items())
     for i in range(0, len(cat_items), 2):
         row = []
         for code, name in cat_items[i:i+2]:
-            icon = "✅" if code in selected_cats else "❌"
+            icon = "🔘" if code in selected_cats else "⚪️"
             row.append(InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"cat_{code}"))
         buttons.append(row)
         
-    buttons.append([InlineKeyboardButton(text="🚀 Сохранить и запустить радар", callback_data="start_radar")])
+    # 3. Кнопка сохранения
+    buttons.append([InlineKeyboardButton(text="🚀 Запустить мониторинг", callback_data="start_radar")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def clean_html(raw_html):
@@ -145,7 +149,7 @@ async def send_latest_order_immediately(user_id: int):
                     
                 if not user_cats or cat_code in user_cats:
                     budget, relevancy = smart_ai_filter(title, summary)
-                    reg_badge = "🇷🇺 RU" if source["region"] == "ru" else "🌍 INT"
+                    reg_badge = "🇷🇺 RU" if source["region"] == "ru" else "🌐 INT"
                     text = (
                         f"⚡️ **Свежий заказ с биржи [{CATEGORIES[cat_code]}] ({reg_badge})**\n\n"
                         f"📌 **{title}**\n"
@@ -173,8 +177,8 @@ async def trigger_radar_activation(user_id: int, message_or_callback):
         "🚀 **Радар успешно запущен!**\n\n"
         "🛰 **Как поступают заказы:**\n"
         "• Ниже прислан **последний актуальный проект** с биржи для проверки связи.\n"
-        "• Бот сканирует ленты в фоновом режиме каждые **45 секунд**.\n"
-        "• Новые проекты не появляются каждую секунду — они приходят **ровно в момент их публикации** заказчиками!"
+        "• Бот сканирует ленты каждые **45 секунд**.\n"
+        "• Заказы отправляются **сразу в момент публикации** заказчиками!"
     )
     
     if isinstance(message_or_callback, types.Message):
@@ -197,23 +201,20 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
-        f"🤖 **Freelance Radar AI** — ваш персональный агрегатор заказов.\n\n"
-        f"📌 **Что умеет бот:**\n"
-        f"• Собирает заказы с 🇷🇺 **российских** и 🌍 **зарубежных** бирж.\n"
-        f"• Сканирует ленты каждые **45 секунд** в реальном времени.\n"
-        f"• Анализирует бюджет и фильтрует проекты по вашим категориям.\n\n"
-        f"🎁 Активирован **пробный период на 3 дня**!\n\n"
-        f"Настройте фильтры в панели ниже 👇",
+        f"🤖 **Freelance Radar AI** — ваш персональный агрегатор заказов.\n"
+        f"🎁 Пробный период: **3 дня**.\n\n"
+        f"Выберите площадки и категории для отслеживания 👇",
         reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
     await message.answer(
-        "🎛 **Панель управления фильтрами:**",
+        "🎛 **Настройка фильтров:**\n\n"
+        "🔘 — включено  |  ⚪️ — выключено",
         reply_markup=get_settings_keyboard(user_id),
         parse_mode="Markdown"
     )
 
-@dp.message(F.text.in_(["🎛 Настройка фильтров", "🎯 Категории & Регионы", "🎯 Выбрать категории"]))
+@dp.message(F.text.in_(["🎛 Фильтры и Регионы", "🎛 Настройка фильтров", "🎯 Категории & Регионы"]))
 async def btn_choose_categories(message: types.Message):
     user_id = message.from_user.id
     if user_id not in user_preferences:
@@ -222,7 +223,8 @@ async def btn_choose_categories(message: types.Message):
         user_regions[user_id] = {"ru"}
         
     await message.answer(
-        "🎛 **Панель управления фильтрами:**",
+        "🎛 **Настройка фильтров:**\n\n"
+        "🔘 — включено  |  ⚪️ — выключено",
         reply_markup=get_settings_keyboard(user_id),
         parse_mode="Markdown"
     )
@@ -270,10 +272,9 @@ async def admin_panel(message: types.Message):
 async def btn_help(message: types.Message):
     await message.answer(
         "ℹ️ **Как работает Freelance Radar AI:**\n\n"
-        "1. **Настройка фильтров:** в меню «🎛 Настройка фильтров» выберите регионы (🇷🇺 Россия / 🌍 Зарубеж) и нужные категории.\n"
-        "2. **Запуск радара:** по нажатию «🚀 Запустить радар» бот мгновенно присылает последний проект с биржи для проверки связи.\n"
-        "3. **Реальное время:** бот проверяет ленты каждые 45 секунд. Заказы не сыплются непрерывным потоком, а приходят ровно в момент их публикации заказчиками на биржах!\n\n"
-        "⚡️ Каждый проект проходит AI-анализ бюджета и содержит прямую ссылку на отклик.",
+        "1. **Фильтры:** в меню «🎛 Фильтры и Регионы» переключайте тумблеры (🔘/⚪️).\n"
+        "2. **Запуск:** кнопка «🚀 Запустить радар» мгновенно присылает последний проект.\n"
+        "3. **Мониторинг:** бот проверяет ленты каждые 45 секунд и отправляет заказы сразу в момент их публикации.",
         reply_markup=get_main_reply_keyboard(message.from_user.id),
         parse_mode="Markdown"
     )
@@ -304,10 +305,10 @@ async def process_category(callback: CallbackQuery):
         user_preferences[user_id] = set()
     if category in user_preferences[user_id]:
         user_preferences[user_id].remove(category)
-        await callback.answer("Категория убрана")
+        await callback.answer("Категория отключена")
     else:
         user_preferences[user_id].add(category)
-        await callback.answer("Категория добавлена!")
+        await callback.answer("Категория включена!")
     await callback.message.edit_reply_markup(reply_markup=get_settings_keyboard(user_id))
 
 @dp.callback_query(F.data == "start_radar")
@@ -377,7 +378,7 @@ async def real_order_scanner():
                                 user_regs = user_regions.get(user_id, {"ru"})
                                 if source_region in user_regs and (not categories or cat_code in categories):
                                     try:
-                                        reg_badge = "🇷🇺 RU" if source_region == "ru" else "🌍 INT"
+                                        reg_badge = "🇷🇺 RU" if source_region == "ru" else "🌐 INT"
                                         text = (
                                             f"🔥 **Новый заказ! [{CATEGORIES[cat_code]}] ({reg_badge})**\n\n"
                                             f"📌 **{title}**\n"
