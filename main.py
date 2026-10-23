@@ -37,7 +37,7 @@ REGIONS = {
     "int": "🌐 Международные биржи"
 }
 
-# Расширенный список источников (RU + Global)
+# МАКСИМАЛЬНЫЙ СПИСОК ИСТОЧНИКОВ (7 крупных бирж)
 RSS_SOURCES = [
     # --- 🇷🇺 RU Источники ---
     {
@@ -68,6 +68,18 @@ RSS_SOURCES = [
     {
         "name": "We Work Remotely",
         "url": "https://weworkremotely.com/remote-jobs.rss",
+        "default_cat": "dev",
+        "region": "int"
+    },
+    {
+        "name": "Remotive",
+        "url": "https://remotive.com/remote-jobs/feed",
+        "default_cat": "dev",
+        "region": "int"
+    },
+    {
+        "name": "Jobspresso",
+        "url": "https://jobspresso.co/feed/",
         "default_cat": "dev",
         "region": "int"
     }
@@ -198,7 +210,7 @@ async def trigger_radar_activation(user_id: int, message_or_callback):
         "🚀 **Радар успешно запущен!**\n\n"
         "🛰 **Как поступают заказы:**\n"
         "• Ниже прислан **последний актуальный проект** с бирж для проверки связи.\n"
-        "• Бот сканирует все источники каждые **45 секунд**.\n"
+        "• Бот сканирует 7 крупных площадок каждые **45 секунд**.\n"
         "• Заказы отправляются **сразу в момент публикации**!"
     )
     
@@ -295,7 +307,7 @@ async def btn_help(message: types.Message):
         "ℹ️ **Как работает Freelance Radar AI:**\n\n"
         "1. **Шаг 1:** в настройках выберите регионы бирж (Россия / Международные).\n"
         "2. **Шаг 2:** укажите сферы работы (Разработка, Дизайн и др.).\n"
-        "3. **Мониторинг:** радар проверяет площадки каждые 45 секунд и отправляет новые заказы мгновенно!",
+        "3. **Мониторинг:** радар проверяет 7 крупных бирж каждые 45 секунд и отправляет заказы сразу в момент их публикации!",
         reply_markup=get_main_reply_keyboard(message.from_user.id),
         parse_mode="Markdown"
     )
