@@ -18,10 +18,10 @@ from aiogram.types import (
     PreCheckoutQuery
 )
 
-# Ti baro a token ti bot-mo
+# Твой актуальный токен бота
 API_TOKEN = "8849608846:AAEZTR7xULvxNnfUN7Oz_5rdD0v96XwB3Cs"
 
-# Ti Telegram ID-mo
+# Твой Telegram ID администратора
 ADMIN_ID = 8188915960  
 
 logging.basicConfig(level=logging.INFO)
@@ -54,7 +54,7 @@ user_subscriptions = {}
 total_stars_collected = 0
 
 def is_subscription_active(user_id: int) -> bool:
-    """Panag-check ti subscription wenno trial (3 nga aldaw)"""
+    """Проверка активности подписки или триала (3 дня)"""
     if user_id not in user_subscriptions:
         user_subscriptions[user_id] = datetime.now() + timedelta(days=3)
         return True
@@ -142,7 +142,6 @@ async def btn_start_radar(message: types.Message):
 
 @dp.message(Command("testorder"))
 async def test_order_handler(message: types.Message):
-    """Command para iti Admin: pang-test nga insigida ti pannakaipatulod ti order"""
     user_id = message.from_user.id
     if user_id != ADMIN_ID:
         return
@@ -355,7 +354,8 @@ async def real_order_scanner():
                 if not feed or not hasattr(feed, "entries"):
                     continue
                 
-                for entry in feed.entries[:5]:
+                # Увеличили глубину проверки с 5 до 15 последних постов
+                for entry in feed.entries[:15]:
                     order_id = entry.get("id", entry.link)
                     
                     if order_id in sent_orders:
@@ -367,13 +367,15 @@ async def real_order_scanner():
                     
                     cat_code = source["default_cat"]
                     title_lower = title.lower()
-                    if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка"]):
+                    
+                    # Расширенный и умный поиск ключевых слов по категориям
+                    if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка", "figma", "tilda", "макет", "бренд"]):
                         cat_code = "design"
-                    elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод"]):
+                    elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод", "рерайт", "контент", "написание"]):
                         cat_code = "text"
-                    elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид"]):
+                    elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид", "seo", "директ", "продвижение"]):
                         cat_code = "marketing"
-                    elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "разработка"]):
+                    elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "разработка", "react", "vue", "node", "c#", "java", "1с", "биттрикс"]):
                         cat_code = "dev"
 
                     budget, relevancy = smart_ai_filter(title, summary)
