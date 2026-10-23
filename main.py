@@ -37,58 +37,21 @@ REGIONS = {
     "int": "🌐 Международные биржи"
 }
 
-# МАКСИМАЛЬНЫЙ СПИСОК ИСТОЧНИКОВ (7 крупных бирж)
 RSS_SOURCES = [
-    # --- 🇷🇺 RU Источники ---
-    {
-        "name": "Habr Freelance",
-        "url": "https://freelance.habr.com/tasks.rss",
-        "default_cat": "dev",
-        "region": "ru"
-    },
-    {
-        "name": "FL.ru",
-        "url": "https://www.fl.ru/rss/all.xml",
-        "default_cat": "dev",
-        "region": "ru"
-    },
-    {
-        "name": "Freelance.ru",
-        "url": "https://www.freelance.ru/rss/all",
-        "default_cat": "dev",
-        "region": "ru"
-    },
-    # --- 🌐 Global Источники ---
-    {
-        "name": "Freelancer.com",
-        "url": "https://www.freelancer.com/rss.xml",
-        "default_cat": "dev",
-        "region": "int"
-    },
-    {
-        "name": "We Work Remotely",
-        "url": "https://weworkremotely.com/remote-jobs.rss",
-        "default_cat": "dev",
-        "region": "int"
-    },
-    {
-        "name": "Remotive",
-        "url": "https://remotive.com/remote-jobs/feed",
-        "default_cat": "dev",
-        "region": "int"
-    },
-    {
-        "name": "Jobspresso",
-        "url": "https://jobspresso.co/feed/",
-        "default_cat": "dev",
-        "region": "int"
-    }
+    {"name": "Habr Freelance", "url": "https://freelance.habr.com/tasks.rss", "default_cat": "dev", "region": "ru"},
+    {"name": "FL.ru", "url": "https://www.fl.ru/rss/all.xml", "default_cat": "dev", "region": "ru"},
+    {"name": "Freelance.ru", "url": "https://www.freelance.ru/rss/all", "default_cat": "dev", "region": "ru"},
+    {"name": "Freelancer.com", "url": "https://www.freelancer.com/rss.xml", "default_cat": "dev", "region": "int"},
+    {"name": "We Work Remotely", "url": "https://weworkremotely.com/remote-jobs.rss", "default_cat": "dev", "region": "int"},
+    {"name": "Remotive", "url": "https://remotive.com/remote-jobs/feed", "default_cat": "dev", "region": "int"},
+    {"name": "Jobspresso", "url": "https://jobspresso.co/feed/", "default_cat": "dev", "region": "int"}
 ]
 
 sent_orders = set()
 user_preferences = {}
 user_regions = {}
 user_subscriptions = {}
+user_referrals = {}  # Хранит список приглашенных
 total_stars_collected = 0
 
 def is_subscription_active(user_id: int) -> bool:
@@ -97,10 +60,18 @@ def is_subscription_active(user_id: int) -> bool:
         return True
     return datetime.now() < user_subscriptions[user_id]
 
+def add_subscription_days(user_id: int, days: int):
+    now = datetime.now()
+    if user_id in user_subscriptions and user_subscriptions[user_id] > now:
+        user_subscriptions[user_id] += timedelta(days=days)
+    else:
+        user_subscriptions[user_id] = now + timedelta(days=days)
+
+# Главное меню с заменой "Подписки" на яркий "🎁 Бесплатный доступ"
 def get_main_reply_keyboard(user_id: int):
     kb = [
         [KeyboardButton(text="🎛 Настройка фильтров"), KeyboardButton(text="🚀 Запустить радар")],
-        [KeyboardButton(text="💳 Подписка"), KeyboardButton(text="ℹ️ Помощь")]
+        [KeyboardButton(text="🎁 Бесплатный доступ"), KeyboardButton(text="ℹ️ Помощь")]
     ]
     if user_id == ADMIN_ID:
         kb.append([KeyboardButton(text="👑 Админ-панель")])
@@ -109,22 +80,18 @@ def get_main_reply_keyboard(user_id: int):
 def get_regions_keyboard(user_id):
     selected_regs = user_regions.get(user_id, {"ru"})
     buttons = []
-    
     for code, name in REGIONS.items():
         status = "✅ Включено" if code in selected_regs else "❌ Выключено"
         buttons.append([InlineKeyboardButton(text=f"{name}: {status}", callback_data=f"step1_reg_{code}")])
-        
     buttons.append([InlineKeyboardButton(text="Далее: Выбор категорий ➡️", callback_data="go_step2")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_categories_keyboard(user_id):
     selected_cats = user_preferences.get(user_id, set())
     buttons = []
-    
     for code, name in CATEGORIES.items():
         status = "✅" if code in selected_cats else "❌"
         buttons.append([InlineKeyboardButton(text=f"{status} {name}", callback_data=f"step2_cat_{code}")])
-        
     buttons.append([
         InlineKeyboardButton(text="⬅️ Назад", callback_data="go_step1"),
         InlineKeyboardButton(text="🚀 Запустить радар", callback_data="start_radar")
@@ -199,7 +166,7 @@ async def send_latest_order_immediately(user_id: int):
 
 async def trigger_radar_activation(user_id: int, message_or_callback):
     if not is_subscription_active(user_id):
-        text_fail = "🔒 **Срок действия вашей подписки истек.**\nПродлите доступ в разделе **💳 Подписка**."
+        text_fail = "🔒 **Срок действия вашей подписки истек.**\nПродлите доступ за рефералов или в разделе **🎁 Бесплатный доступ**."
         if isinstance(message_or_callback, types.Message):
             await message_or_callback.answer(text_fail, reply_markup=get_main_reply_keyboard(user_id), parse_mode="Markdown")
         else:
@@ -225,18 +192,46 @@ async def trigger_radar_activation(user_id: int, message_or_callback):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
+    is_new_user = user_id not in user_subscriptions
+
     if user_id not in user_preferences:
         user_preferences[user_id] = set(CATEGORIES.keys())
     if user_id not in user_regions:
         user_regions[user_id] = {"ru"}
         
     is_subscription_active(user_id)
+
+    # Реферальная обработка
+    args = message.text.split(maxsplit=1)
+    if is_new_user and len(args) > 1 and args[1].startswith("ref_"):
+        try:
+            referrer_id = int(args[1].replace("ref_", ""))
+            if referrer_id != user_id:
+                if referrer_id not in user_referrals:
+                    user_referrals[referrer_id] = []
+                user_referrals[referrer_id].append(user_id)
+                
+                add_subscription_days(referrer_id, 7)
+                
+                try:
+                    await bot.send_message(
+                        referrer_id,
+                        f"🎉 **Новый реферал!**\n"
+                        f"По вашей ссылке зарегистрировался новый пользователь.\n"
+                        f"🎁 Вам начислено **+7 дней бесплатной подписки**!",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logging.error(f"Ошибка уведомления реферера {referrer_id}: {e}")
+        except ValueError:
+            pass
     
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
         f"🤖 **Freelance Radar AI** — ваш персональный агрегатор заказов.\n"
-        f"🎁 Пробный период: **3 дня**.\n\n"
-        f"Давайте настроим регионы и категории задач 👇",
+        f"🎁 Вам активирован пробный период на **3 дня**!\n\n"
+        f"💡 **Бесплатный доступ навсегда:**\n"
+        f"Делитесь ботом с коллегами и получайте **+7 дней PRO** за каждого друга!",
         reply_markup=get_main_reply_keyboard(user_id),
         parse_mode="Markdown"
     )
@@ -266,6 +261,34 @@ async def btn_choose_categories(message: types.Message):
 async def btn_start_radar(message: types.Message):
     await trigger_radar_activation(message.from_user.id, message)
 
+@dp.message(F.text.in_(["🎁 Бесплатный доступ", "💳 Подписка"]))
+async def btn_subscription(message: types.Message):
+    user_id = message.from_user.id
+    active = is_subscription_active(user_id)
+    until_date = user_subscriptions[user_id].strftime("%d.%m.%Y %H:%M")
+    status_text = f"✅ Активна (до `{until_date}`)" if active else "❌ Истекла"
+    
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
+    ref_count = len(user_referrals.get(user_id, []))
+    share_text = f"https://t.me/share/url?url={ref_link}&text=Нашел%20крутого%20AI-бота,%20который%20собирает%20заказы%20со%20всех%20фриланс-бирж!"
+    
+    text = (
+        f"🎁 **Партнерская программа & Доступ**\n\n"
+        f"• **Статус подписки:** {status_text}\n\n"
+        f"───\n\n"
+        f"🚀 **Как пользоваться ботом бесплатно:**\n"
+        f"Приглашайте коллег и друзей-фрилансеров! За каждого человека вы получаете **+7 дней PRO-доступа**.\n\n"
+        f"🔗 **Ваша личная ссылка:**\n`{ref_link}`\n\n"
+        f"📊 **Приглашено людей:** `{ref_count}`"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📲 Поделиться ссылкой с другом", url=share_text)],
+        [InlineKeyboardButton(text="⭐ Купить подписку за Stars (333 Stars)", callback_data="buy_stars")]
+    ])
+    await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+
 @dp.message(Command("testorder"))
 async def test_order_handler(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -283,23 +306,18 @@ async def test_order_handler(message: types.Message):
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
-@dp.message(F.text == "💳 Подписка")
-async def btn_subscription(message: types.Message):
-    user_id = message.from_user.id
-    active = is_subscription_active(user_id)
-    until_date = user_subscriptions[user_id].strftime("%d.%m.%Y %H:%M")
-    status_text = f"✅ Активна (до `{until_date}`)" if active else "❌ Истекла"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐ Продлить за 333 Stars (1 мес.)", callback_data="buy_stars")]
-    ])
-    await message.answer(f"💳 **Подписка**\n\n• Статус: {status_text}", reply_markup=keyboard, parse_mode="Markdown")
-
 @dp.message(F.text == "👑 Админ-панель")
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer(f"👑 **Админ-панель**\n⭐ Собрано звезд: `{total_stars_collected}` XTR", parse_mode="Markdown")
+    total_users = len(user_subscriptions)
+    await message.answer(
+        f"👑 **Админ-панель**\n\n"
+        f"👥 Всего пользователей: `{total_users}`\n"
+        f"⭐ Собрано звезд: `{total_stars_collected}` XTR", 
+        parse_mode="Markdown"
+    )
 
 @dp.message(F.text == "ℹ️ Помощь")
 async def btn_help(message: types.Message):
@@ -307,7 +325,8 @@ async def btn_help(message: types.Message):
         "ℹ️ **Как работает Freelance Radar AI:**\n\n"
         "1. **Шаг 1:** в настройках выберите регионы бирж (Россия / Международные).\n"
         "2. **Шаг 2:** укажите сферы работы (Разработка, Дизайн и др.).\n"
-        "3. **Мониторинг:** радар проверяет 7 крупных бирж каждые 45 секунд и отправляет заказы сразу в момент их публикации!",
+        "3. **Мониторинг:** радар проверяет 7 крупных бирж каждые 45 секунд и отправляет заказы сразу в момент их публикации!\n\n"
+        "🎁 Жмите кнопку «🎁 Бесплатный доступ», чтобы приглашать друзей и получать подписку бесплатно!",
         reply_markup=get_main_reply_keyboard(message.from_user.id),
         parse_mode="Markdown"
     )
@@ -392,8 +411,8 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
 async def process_successful_payment(message: types.Message):
     global total_stars_collected
     total_stars_collected += 333
-    user_subscriptions[message.from_user.id] = datetime.now() + timedelta(days=30)
-    await message.answer("🎉 Оплата прошла успешно!", reply_markup=get_main_reply_keyboard(message.from_user.id))
+    add_subscription_days(message.from_user.id, 30)
+    await message.answer("🎉 Оплата прошла успешно! Добавлено +30 дней.", reply_markup=get_main_reply_keyboard(message.from_user.id))
 
 async def real_order_scanner():
     while True:
