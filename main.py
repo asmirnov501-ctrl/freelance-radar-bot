@@ -18,7 +18,6 @@ from aiogram.types import (
     PreCheckoutQuery
 )
 
-# Твой актуальный токен бота
 API_TOKEN = "8849608846:AAEZTR7xULvxNnfUN7Oz_5rdD0v96XwB3Cs"
 ADMIN_ID = 8188915960  
 
@@ -79,15 +78,12 @@ def get_settings_keyboard(user_id):
     selected_regs = user_regions.get(user_id, {"ru"})
     
     buttons = []
-    
-    # 1. Регионы в ряд (2 колонки)
     reg_row = []
     for code, name in REGIONS.items():
         icon = "🟢" if code in selected_regs else "⚪️"
         reg_row.append(InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"reg_{code}"))
     buttons.append(reg_row)
     
-    # 2. Категории по 2 в ряд
     cat_items = list(CATEGORIES.items())
     for i in range(0, len(cat_items), 2):
         row = []
@@ -96,10 +92,99 @@ def get_settings_keyboard(user_id):
             row.append(InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"cat_{code}"))
         buttons.append(row)
         
-    # 3. Кнопка запуска внизу
     buttons.append([InlineKeyboardButton(text="🚀 Сохранить и запустить радар", callback_data="start_radar")])
-    
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def clean_html(raw_html):
+    cleanr = re.compile('<.*?>')
+    cleantext = re.sub(cleanr, '', raw_html)
+    return cleantext.strip()[:250] + "..." if len(cleantext) > 250 else cleantext.strip()
+
+def smart_ai_filter(title, summary):
+    full_text = (title + " " + summary).lower()
+    budget_match = re.search(r'(\d+[\s\d]*)\s?(руб|₽|\$|usd|тыс|р\.)', full_text)
+    budget = budget_match.group(0).upper() if budget_match else "По договоренности"
+    return budget, 95
+
+async def fetch_rss_feed(url):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    feed = await asyncio.to_thread(feedparser.parse, text)
+                    return feed
+    except Exception as e:
+        logging.error(f"Ошибка загрузки ленты {url}: {e}")
+    return None
+
+async def send_latest_order_immediately(user_id: int):
+    """Отправляет один последний релевантный заказ сразу при запуске радара"""
+    user_cats = user_preferences.get(user_id, set())
+    user_regs = user_regions.get(user_id, {"ru"})
+    
+    for source in RSS_SOURCES:
+        if source["region"] not in user_regs:
+            continue
+        feed = await fetch_rss_feed(source["url"])
+        if feed and hasattr(feed, "entries") and feed.entries:
+            for entry in feed.entries[:10]:
+                title = entry.title
+                summary = clean_html(entry.get("summary", "Описание отсутствует"))
+                cat_code = source["default_cat"]
+                title_lower = title.lower()
+                
+                if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка", "figma", "tilda"]):
+                    cat_code = "design"
+                elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод", "рерайт"]):
+                    cat_code = "text"
+                elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид", "seo", "директ"]):
+                    cat_code = "marketing"
+                elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "react", "vue", "node", "c#", "java", "1с"]):
+                    cat_code = "dev"
+                    
+                if not user_cats or cat_code in user_cats:
+                    budget, relevancy = smart_ai_filter(title, summary)
+                    reg_badge = "🇷🇺 RU" if source["region"] == "ru" else "🌍 INT"
+                    text = (
+                        f"⚡️ **Свежий заказ с биржи [{CATEGORIES[cat_code]}] ({reg_badge})**\n\n"
+                        f"📌 **{title}**\n"
+                        f"💰 **Бюджет:** `{budget}`\n"
+                        f"🌐 **Источник:** `{source['name']}`\n\n"
+                        f"📝 {summary}\n\n"
+                        f"⚡️ *AI-фильтр: {relevancy}% relevancy*"
+                    )
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=entry.link)]
+                    ])
+                    await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
+                    return
+
+async def trigger_radar_activation(user_id: int, message_or_callback):
+    if not is_subscription_active(user_id):
+        text_fail = "🔒 **Срок действия вашей подписки истек.**\nПродлите доступ в разделе **💳 Подписка**."
+        if isinstance(message_or_callback, types.Message):
+            await message_or_callback.answer(text_fail, reply_markup=get_main_reply_keyboard(user_id), parse_mode="Markdown")
+        else:
+            await message_or_callback.message.answer(text_fail, reply_markup=get_main_reply_keyboard(user_id), parse_mode="Markdown")
+        return
+
+    text_success = (
+        "🚀 **Радар успешно запущен!**\n\n"
+        "🛰 **Как поступают заказы:**\n"
+        "• Ниже прислали **последний опубликованный проект** с биржи.\n"
+        "• Бот сканирует ленты каждые 45 секунд.\n"
+        "• Как только заказчик опубликует новый проект, вы сразу получите уведомление!"
+    )
+    
+    if isinstance(message_or_callback, types.Message):
+        await message_or_callback.answer(text_success, reply_markup=get_main_reply_keyboard(user_id), parse_mode="Markdown")
+    else:
+        await message_or_callback.message.answer(text_success, reply_markup=get_main_reply_keyboard(user_id), parse_mode="Markdown")
+        await message_or_callback.answer()
+        
+    await send_latest_order_immediately(user_id)
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -141,15 +226,7 @@ async def btn_choose_categories(message: types.Message):
 
 @dp.message(F.text == "🚀 Запустить радар")
 async def btn_start_radar(message: types.Message):
-    user_id = message.from_user.id
-    if not is_subscription_active(user_id):
-        await message.answer("🔒 Срок действия подписки истек.", reply_markup=get_main_reply_keyboard(user_id))
-        return
-    await message.answer(
-        "🚀 **Радар успешно запущен! Мониторинг бирж активен.**",
-        reply_markup=get_main_reply_keyboard(user_id),
-        parse_mode="Markdown"
-    )
+    await trigger_radar_activation(message.from_user.id, message)
 
 @dp.message(Command("testorder"))
 async def test_order_handler(message: types.Message):
@@ -224,8 +301,7 @@ async def process_category(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "start_radar")
 async def start_radar_callback(callback: CallbackQuery):
-    await callback.message.answer("🚀 Радар успешно запущен! Мониторинг настроен.", reply_markup=get_main_reply_keyboard(callback.from_user.id))
-    await callback.answer()
+    await trigger_radar_activation(callback.from_user.id, callback)
 
 @dp.callback_query(F.data == "buy_stars")
 async def send_stars_invoice(callback: CallbackQuery):
@@ -251,30 +327,6 @@ async def process_successful_payment(message: types.Message):
     total_stars_collected += 333
     user_subscriptions[message.from_user.id] = datetime.now() + timedelta(days=30)
     await message.answer("🎉 Оплата прошла успешно!", reply_markup=get_main_reply_keyboard(message.from_user.id))
-
-def clean_html(raw_html):
-    cleanr = re.compile('<.*?>')
-    cleantext = re.sub(cleanr, '', raw_html)
-    return cleantext.strip()[:250] + "..." if len(cleantext) > 250 else cleantext.strip()
-
-def smart_ai_filter(title, summary):
-    full_text = (title + " " + summary).lower()
-    budget_match = re.search(r'(\d+[\s\d]*)\s?(руб|₽|\$|usd|тыс|р\.)', full_text)
-    budget = budget_match.group(0).upper() if budget_match else "По договоренности"
-    return budget, 95
-
-async def fetch_rss_feed(url):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    feed = await asyncio.to_thread(feedparser.parse, text)
-                    return feed
-    except Exception as e:
-        logging.error(f"Ошибка загрузки ленты {url}: {e}")
-    return None
 
 async def real_order_scanner():
     while True:
