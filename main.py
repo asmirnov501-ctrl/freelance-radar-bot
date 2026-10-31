@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import html
 import aiohttp
 import feedparser
 from datetime import datetime, timedelta
@@ -131,9 +132,9 @@ async def send_latest_order_immediately(user_id: int):
         feed = await fetch_rss_feed(source["url"])
         if feed and hasattr(feed, "entries") and feed.entries:
             for entry in feed.entries[:10]:
-                title = entry.title
+                title = html.unescape(entry.title)
                 link = entry.link
-                summary = clean_html(entry.get("summary", "Описание отсутствует"))
+                summary = html.unescape(clean_html(entry.get("summary", "Описание отсутствует")))
                 cat_code = source["default_cat"]
                 title_lower = title.lower()
                 
@@ -426,9 +427,9 @@ async def real_order_scanner():
                         if order_id in sent_orders:
                             continue
                             
-                        title = entry.title
+                        title = html.unescape(entry.title)
                         link = entry.link
-                        summary = clean_html(entry.get("summary", "Описание отсутствует"))
+                        summary = html.unescape(clean_html(entry.get("summary", "Описание отсутствует")))
                         
                         cat_code = source["default_cat"]
                         source_region = source["region"]
