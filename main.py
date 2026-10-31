@@ -53,6 +53,7 @@ user_preferences = {}
 user_regions = {}
 user_subscriptions = {}
 user_referrals = {}
+user_sources = {}
 total_stars_collected = 0
 
 def is_subscription_active(user_id: int) -> bool:
@@ -202,28 +203,40 @@ async def cmd_start(message: types.Message):
     is_subscription_active(user_id)
 
     args = message.text.split(maxsplit=1)
-    if is_new_user and len(args) > 1 and args[1].startswith("ref_"):
-        try:
-            referrer_id = int(args[1].replace("ref_", ""))
-            if referrer_id != user_id:
-                if referrer_id not in user_referrals:
-                    user_referrals[referrer_id] = []
-                user_referrals[referrer_id].append(user_id)
-                
-                add_subscription_days(referrer_id, 7)
-                
-                try:
-                    await bot.send_message(
-                        referrer_id,
-                        f"🎉 **Новый реферал!**\n"
-                        f"По вашей ссылке зарегистрировался новый пользователь.\n"
-                        f"🎁 Вам начислено **+7 дней бесплатной подписки**!",
-                        parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    logging.error(f"Ошибка уведомления реферера {referrer_id}: {e}")
-        except ValueError:
-            pass
+    if is_new_user and len(args) > 1:
+        param = args[1].lower()
+        if param.startswith("ref_"):
+            try:
+                referrer_id = int(param.replace("ref_", ""))
+                if referrer_id != user_id:
+                    if referrer_id not in user_referrals:
+                        user_referrals[referrer_id] = []
+                    user_referrals[referrer_id].append(user_id)
+                    user_sources[user_id] = "Реферал"
+                    add_subscription_days(referrer_id, 7)
+                    
+                    try:
+                        await bot.send_message(
+                            referrer_id,
+                            f"🎉 **Новый реферал!**\n"
+                            f"По вашей ссылке зарегистрировался новый пользователь.\n"
+                            f"🎁 Вам начислено **+7 дней бесплатной подписки**!",
+                            parse_mode="Markdown"
+                        )
+                    except Exception as e:
+                        logging.error(f"Ошибка уведомления реферера {referrer_id}: {e}")
+            except ValueError:
+                pass
+        elif param in ["tt", "tiktok"]:
+            user_sources[user_id] = "TikTok 🎵"
+        elif param in ["ig", "instagram"]:
+            user_sources[user_id] = "Instagram 📸"
+        elif param in ["yt", "youtube", "shorts"]:
+            user_sources[user_id] = "YouTube Shorts ▶️"
+        else:
+            user_sources[user_id] = f"Кампания ({param})"
+    elif is_new_user and user_id not in user_sources:
+        user_sources[user_id] = "Прямой переход / Поиск 🔍"
     
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
@@ -311,12 +324,48 @@ async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     total_users = len(user_subscriptions)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📊 Источники переходов (UTM)", callback_data="admin_sources")]
+    ])
     await message.answer(
         f"👑 **Админ-панель**\n\n"
         f"👥 Всего пользователей: `{total_users}`\n"
         f"⭐ Собрано звезд: `{total_stars_collected}` XTR", 
+        reply_markup=keyboard,
         parse_mode="Markdown"
     )
+
+@dp.callback_query(F.data == "admin_users")
+async def admin_users_list(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    msg = "👥 **Список пользователей:**\n\n"
+    for uid, sub_date in user_subscriptions.items():
+        status = "✅ Active" if datetime.now() < sub_date else "❌ Expired"
+        refs = len(user_referrals.get(uid, []))
+        src = user_sources.get(uid, "Неизвестно")
+        msg += f"• ID: `{uid}` | {status} | Рефералов: `{refs}` | Откуда: `{src}`\n"
+    await callback.message.answer(msg, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_sources")
+async def admin_sources_stats(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    stats = {}
+    for src in user_sources.values():
+        stats[src] = stats.get(src, 0) + 1
+    
+    msg = "📊 **Статистика по источникам (UTM):**\n\n"
+    if not stats:
+        msg += "Пока нет данных о переходах."
+    else:
+        for src_name, count in stats.items():
+            msg += f"• {src_name}: `{count}` чел.\n"
+            
+    await callback.message.answer(msg, parse_mode="Markdown")
+    await callback.answer()
 
 @dp.message(F.text == "ℹ️ Помощь")
 async def btn_help(message: types.Message):
