@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import html
+import sqlite3
 import aiohttp
 import feedparser
 from datetime import datetime, timedelta
@@ -25,6 +26,90 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "8188915960"))
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
+
+# --- DATABASE SETUP ---
+DB_NAME = "users.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            sub_until TEXT,
+            source TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER,
+            referred_id INTEGER
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS preferences (
+            user_id INTEGER,
+            category TEXT,
+            PRIMARY KEY (user_id, category)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS regions (
+            user_id INTEGER,
+            region TEXT,
+            PRIMARY KEY (user_id, region)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def db_get_user(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, sub_until, source FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def db_register_user(user_id: int, source: str = "Прямой переход 🔍"):
+    sub_until = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (user_id, sub_until, source) VALUES (?, ?, ?)",
+        (user_id, sub_until, source)
+    )
+    for cat in ["design", "dev", "text", "marketing"]:
+        cursor.execute("INSERT OR IGNORE INTO preferences (user_id, category) VALUES (?, ?)", (user_id, cat))
+    cursor.execute("INSERT OR IGNORE INTO regions (user_id, region) VALUES (?, 'ru')", (user_id,))
+    conn.commit()
+    conn.close()
+
+def is_subscription_active(user_id: int) -> bool:
+    user = db_get_user(user_id)
+    if not user:
+        db_register_user(user_id)
+        return True
+    sub_until = datetime.strptime(user[1], "%Y-%m-%d %H:%M:%S")
+    return datetime.now() < sub_until
+
+def add_subscription_days(user_id: int, days: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT sub_until FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    now = datetime.now()
+    if row:
+        current_sub = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+        new_sub = (current_sub + timedelta(days=days)) if current_sub > now else (now + timedelta(days=days))
+    else:
+        new_sub = now + timedelta(days=days)
+    cursor.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (new_sub.strftime("%Y-%m-%d %H:%M:%S"), user_id))
+    conn.commit()
+    conn.close()
 
 CATEGORIES = {
     "design": "🎨 Дизайн & UX/UI",
@@ -49,25 +134,7 @@ RSS_SOURCES = [
 ]
 
 sent_orders = set()
-user_preferences = {}
-user_regions = {}
-user_subscriptions = {}
-user_referrals = {}
-user_sources = {}
 total_stars_collected = 0
-
-def is_subscription_active(user_id: int) -> bool:
-    if user_id not in user_subscriptions:
-        user_subscriptions[user_id] = datetime.now() + timedelta(days=3)
-        return True
-    return datetime.now() < user_subscriptions[user_id]
-
-def add_subscription_days(user_id: int, days: int):
-    now = datetime.now()
-    if user_id in user_subscriptions and user_subscriptions[user_id] > now:
-        user_subscriptions[user_id] += timedelta(days=days)
-    else:
-        user_subscriptions[user_id] = now + timedelta(days=days)
 
 def get_main_reply_keyboard(user_id: int):
     kb = [
@@ -79,7 +146,12 @@ def get_main_reply_keyboard(user_id: int):
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_regions_keyboard(user_id):
-    selected_regs = user_regions.get(user_id, {"ru"})
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT region FROM regions WHERE user_id = ?", (user_id,))
+    selected_regs = {row[0] for row in cursor.fetchall()}
+    conn.close()
+
     buttons = []
     for code, name in REGIONS.items():
         status = "✅ Включено" if code in selected_regs else "❌ Выключено"
@@ -88,7 +160,12 @@ def get_regions_keyboard(user_id):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_categories_keyboard(user_id):
-    selected_cats = user_preferences.get(user_id, set())
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT category FROM preferences WHERE user_id = ?", (user_id,))
+    selected_cats = {row[0] for row in cursor.fetchall()}
+    conn.close()
+
     buttons = []
     for code, name in CATEGORIES.items():
         status = "✅" if code in selected_cats else "❌"
@@ -108,7 +185,7 @@ def smart_ai_filter(title, summary):
     full_text = (title + " " + summary).lower()
     budget_match = re.search(r'(\d+[\s\d]*)\s?(руб|₽|\$|usd|eur|€|тыс|р\.)', full_text)
     budget = budget_match.group(0).upper() if budget_match else "По договоренности"
-    return budget, 95
+    return budget
 
 async def fetch_rss_feed(url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -124,8 +201,13 @@ async def fetch_rss_feed(url):
     return None
 
 async def send_latest_order_immediately(user_id: int):
-    user_cats = user_preferences.get(user_id, set())
-    user_regs = user_regions.get(user_id, {"ru"})
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT category FROM preferences WHERE user_id = ?", (user_id,))
+    user_cats = {row[0] for row in cursor.fetchall()}
+    cursor.execute("SELECT region FROM regions WHERE user_id = ?", (user_id,))
+    user_regs = {row[0] for row in cursor.fetchall()}
+    conn.close()
     
     for source in RSS_SOURCES:
         if source["region"] not in user_regs:
@@ -149,15 +231,14 @@ async def send_latest_order_immediately(user_id: int):
                     cat_code = "dev"
                     
                 if not user_cats or cat_code in user_cats:
-                    budget, relevancy = smart_ai_filter(title, summary)
+                    budget = smart_ai_filter(title, summary)
                     reg_badge = "🇷🇺 RU" if source["region"] == "ru" else "🌐 GLOBAL"
                     text = (
                         f"⚡️ **Свежий заказ с биржи [{CATEGORIES[cat_code]}] ({reg_badge})**\n\n"
                         f"📌 **{title}**\n"
                         f"💰 **Бюджет:** `{budget}`\n"
                         f"🌐 **Источник:** `{source['name']}`\n\n"
-                        f"📝 {summary}\n\n"
-                        f"⚡️ *AI-фильтр: {relevancy}% relevancy*"
+                        f"📝 {summary}"
                     )
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=link)]
@@ -193,28 +274,24 @@ async def trigger_radar_activation(user_id: int, message_or_callback):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    is_new_user = user_id not in user_subscriptions
-
-    if user_id not in user_preferences:
-        user_preferences[user_id] = set(CATEGORIES.keys())
-    if user_id not in user_regions:
-        user_regions[user_id] = {"ru"}
-        
-    is_subscription_active(user_id)
-
+    user_data = db_get_user(user_id)
+    
     args = message.text.split(maxsplit=1)
-    if is_new_user and len(args) > 1:
+    source = "Прямой переход 🔍"
+    
+    if len(args) > 1:
         param = args[1].lower()
         if param.startswith("ref_"):
             try:
                 referrer_id = int(param.replace("ref_", ""))
                 if referrer_id != user_id:
-                    if referrer_id not in user_referrals:
-                        user_referrals[referrer_id] = []
-                    user_referrals[referrer_id].append(user_id)
-                    user_sources[user_id] = "Реферал"
+                    conn = sqlite3.connect(DB_NAME)
+                    cursor = conn.cursor()
+                    cursor.execute("INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)", (referrer_id, user_id))
+                    conn.commit()
+                    conn.close()
+                    source = "Реферал"
                     add_subscription_days(referrer_id, 7)
-                    
                     try:
                         await bot.send_message(
                             referrer_id,
@@ -228,16 +305,17 @@ async def cmd_start(message: types.Message):
             except ValueError:
                 pass
         elif param in ["tt", "tiktok"]:
-            user_sources[user_id] = "TikTok 🎵"
+            source = "TikTok 🎵"
         elif param in ["ig", "instagram"]:
-            user_sources[user_id] = "Instagram 📸"
+            source = "Instagram 📸"
         elif param in ["yt", "youtube", "shorts"]:
-            user_sources[user_id] = "YouTube Shorts ▶️"
+            source = "YouTube Shorts ▶️"
         else:
-            user_sources[user_id] = f"Кампания ({param})"
-    elif is_new_user and user_id not in user_sources:
-        user_sources[user_id] = "Прямой переход / Поиск 🔍"
-    
+            source = f"Кампания ({param})"
+
+    if not user_data:
+        db_register_user(user_id, source)
+
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
         f"🤖 **Freelance Radar AI** — ваш персональный агрегатор заказов.\n"
@@ -257,10 +335,8 @@ async def cmd_start(message: types.Message):
 @dp.message(F.text.in_(["🎛 Настройка фильтров", "🎛 Фильтры и Регионы", "🎯 Категории & Регионы"]))
 async def btn_choose_categories(message: types.Message):
     user_id = message.from_user.id
-    if user_id not in user_preferences:
-        user_preferences[user_id] = set(CATEGORIES.keys())
-    if user_id not in user_regions:
-        user_regions[user_id] = {"ru"}
+    if not db_get_user(user_id):
+        db_register_user(user_id)
         
     await message.answer(
         "📍 **Шаг 1 из 2: Выберите регионы бирж**\n\n"
@@ -277,12 +353,20 @@ async def btn_start_radar(message: types.Message):
 async def btn_subscription(message: types.Message):
     user_id = message.from_user.id
     active = is_subscription_active(user_id)
-    until_date = user_subscriptions[user_id].strftime("%d.%m.%Y %H:%M")
+    user_data = db_get_user(user_id)
+    
+    until_date = user_data[1] if user_data else "3 дня"
     status_text = f"✅ Активна (до `{until_date}`)" if active else "❌ Истекла"
     
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
-    ref_count = len(user_referrals.get(user_id, []))
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (user_id,))
+    ref_count = cursor.fetchone()[0]
+    conn.close()
+
     share_text = f"https://t.me/share/url?url={ref_link}&text=Нашел%20крутого%20AI-бота,%20который%20собирает%20заказы%20со%20всех%20фриланс-бирж!"
     
     text = (
@@ -310,8 +394,7 @@ async def test_order_handler(message: types.Message):
         f"📌 **Тестовый проект: Разработка Telegram-бота на Python**\n"
         f"💰 **Бюджет:** `50 000 ₽`\n"
         f"🌐 **Источник:** `Habr Freelance (Тест)`\n\n"
-        f"📝 Требуется опытный разработчик...\n\n"
-        f"⚡️ *AI-фильтр: 98% relevancy*"
+        f"📝 Требуется опытный разработчик..."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 Откликнуться", url="https://freelance.habr.com")]
@@ -323,7 +406,12 @@ async def test_order_handler(message: types.Message):
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-    total_users = len(user_subscriptions)
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    conn.close()
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
         [InlineKeyboardButton(text="📊 Источники переходов (UTM)", callback_data="admin_sources")]
@@ -340,12 +428,20 @@ async def admin_panel(message: types.Message):
 async def admin_users_list(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, sub_until, source FROM users")
+    rows = cursor.fetchall()
+    
     msg = "👥 **Список пользователей:**\n\n"
-    for uid, sub_date in user_subscriptions.items():
-        status = "✅ Active" if datetime.now() < sub_date else "❌ Expired"
-        refs = len(user_referrals.get(uid, []))
-        src = user_sources.get(uid, "Неизвестно")
+    for r in rows:
+        uid, sub_until, src = r[0], r[1], r[2]
+        status = "✅ Active" if datetime.now() < datetime.strptime(sub_until, "%Y-%m-%d %H:%M:%S") else "❌ Expired"
+        cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (uid,))
+        refs = cursor.fetchone()[0]
         msg += f"• ID: `{uid}` | {status} | Рефералов: `{refs}` | Откуда: `{src}`\n"
+    conn.close()
+
     await callback.message.answer(msg, parse_mode="Markdown")
     await callback.answer()
 
@@ -353,15 +449,17 @@ async def admin_users_list(callback: CallbackQuery):
 async def admin_sources_stats(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
-    stats = {}
-    for src in user_sources.values():
-        stats[src] = stats.get(src, 0) + 1
-    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT source, COUNT(*) FROM users GROUP BY source")
+    rows = cursor.fetchall()
+    conn.close()
+
     msg = "📊 **Статистика по источникам (UTM):**\n\n"
-    if not stats:
+    if not rows:
         msg += "Пока нет данных о переходах."
     else:
-        for src_name, count in stats.items():
+        for src_name, count in rows:
             msg += f"• {src_name}: `{count}` чел.\n"
             
     await callback.message.answer(msg, parse_mode="Markdown")
@@ -371,9 +469,9 @@ async def admin_sources_stats(callback: CallbackQuery):
 async def btn_help(message: types.Message):
     await message.answer(
         "ℹ️ **Как работает Freelance Radar AI:**\n\n"
-        "1. **Шаг 1:** в настройках выберите регионы бирж (Россия / Международные).\n"
-        "2. **Шаг 2:** укажите сферы работы (Разработка, Дизайн и др.).\n"
-        "3. **Мониторинг:** радар проверяет 7 крупных бирж каждые 45 секунд и отправляет заказы сразу в момент их публикации!\n\n"
+        "1. **Шаг 1:** Выберите регионы бирж (Россия / Международные).\n"
+        "2. **Шаг 2:** Укажите сферы работы (Разработка, Дизайн и др.).\n"
+        "3. **Мониторинг:** Бот проверяет 7 крупных бирж каждые 45 секунд и отправляет заказы сразу в момент их публикации!\n\n"
         "🎁 Жмите кнопку «🎁 Бесплатный доступ», чтобы приглашать друзей и получать подписку бесплатно!",
         reply_markup=get_main_reply_keyboard(message.from_user.id),
         parse_mode="Markdown"
@@ -383,18 +481,25 @@ async def btn_help(message: types.Message):
 async def process_region_step1(callback: CallbackQuery):
     user_id = callback.from_user.id
     reg = callback.data.replace("step1_reg_", "")
-    if user_id not in user_regions:
-        user_regions[user_id] = set()
-    if reg in user_regions[user_id]:
-        if len(user_regions[user_id]) > 1:
-            user_regions[user_id].remove(reg)
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT region FROM regions WHERE user_id = ?", (user_id,))
+    regs = [r[0] for r in cursor.fetchall()]
+    
+    if reg in regs:
+        if len(regs) > 1:
+            cursor.execute("DELETE FROM regions WHERE user_id = ? AND region = ?", (user_id, reg))
             await callback.answer("Регион отключен")
         else:
             await callback.answer("Выберите хотя бы один регион!", show_alert=True)
+            conn.close()
             return
     else:
-        user_regions[user_id].add(reg)
+        cursor.execute("INSERT INTO regions (user_id, region) VALUES (?, ?)", (user_id, reg))
         await callback.answer("Регион включен!")
+    conn.commit()
+    conn.close()
     await callback.message.edit_reply_markup(reply_markup=get_regions_keyboard(user_id))
 
 @dp.callback_query(F.data == "go_step2")
@@ -423,14 +528,20 @@ async def go_to_step1(callback: CallbackQuery):
 async def process_category_step2(callback: CallbackQuery):
     user_id = callback.from_user.id
     category = callback.data.replace("step2_cat_", "")
-    if user_id not in user_preferences:
-        user_preferences[user_id] = set()
-    if category in user_preferences[user_id]:
-        user_preferences[user_id].remove(category)
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT category FROM preferences WHERE user_id = ?", (user_id,))
+    cats = [r[0] for r in cursor.fetchall()]
+    
+    if category in cats:
+        cursor.execute("DELETE FROM preferences WHERE user_id = ? AND category = ?", (user_id, category))
         await callback.answer("Категория убрана")
     else:
-        user_preferences[user_id].add(category)
+        cursor.execute("INSERT INTO preferences (user_id, category) VALUES (?, ?)", (user_id, category))
         await callback.answer("Категория добавлена!")
+    conn.commit()
+    conn.close()
     await callback.message.edit_reply_markup(reply_markup=get_categories_keyboard(user_id))
 
 @dp.callback_query(F.data == "start_radar")
@@ -493,12 +604,21 @@ async def real_order_scanner():
                         elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "react", "vue", "node", "c#", "java", "1с", "developer"]):
                             cat_code = "dev"
 
-                        budget, relevancy = smart_ai_filter(title, summary)
+                        budget = smart_ai_filter(title, summary)
                         
-                        for user_id, categories in user_preferences.items():
-                            if is_subscription_active(user_id):
-                                user_regs = user_regions.get(user_id, {"ru"})
-                                if source_region in user_regs and (not categories or cat_code in categories):
+                        conn = sqlite3.connect(DB_NAME)
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT user_id FROM users")
+                        users = cursor.fetchall()
+                        
+                        for (u_id,) in users:
+                            if is_subscription_active(u_id):
+                                cursor.execute("SELECT region FROM regions WHERE user_id = ?", (u_id,))
+                                u_regs = {r[0] for r in cursor.fetchall()}
+                                cursor.execute("SELECT category FROM preferences WHERE user_id = ?", (u_id,))
+                                u_cats = {r[0] for r in cursor.fetchall()}
+                                
+                                if source_region in u_regs and (not u_cats or cat_code in u_cats):
                                     try:
                                         reg_badge = "🇷🇺 RU" if source_region == "ru" else "🌐 GLOBAL"
                                         text = (
@@ -506,17 +626,17 @@ async def real_order_scanner():
                                             f"📌 **{title}**\n"
                                             f"💰 **Бюджет:** `{budget}`\n"
                                             f"🌐 **Источник:** `{source['name']}`\n\n"
-                                            f"📝 {summary}\n\n"
-                                            f"⚡️ *AI-фильтр: {relevancy}% relevancy*"
+                                            f"📝 {summary}"
                                         )
                                         keyboard = InlineKeyboardMarkup(inline_keyboard=[
                                             [InlineKeyboardButton(text="💬 Откликнуться", url=link)]
                                         ])
-                                        await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
+                                        await bot.send_message(u_id, text, reply_markup=keyboard, parse_mode="Markdown")
                                         await asyncio.sleep(0.05)
                                     except Exception as e:
-                                        logging.error(f"Ошибка отправки пользователю {user_id}: {e}")
-                                    
+                                        logging.error(f"Ошибка отправки пользователю {u_id}: {e}")
+                                        
+                        conn.close()
                         sent_orders.add(order_id)
                 except Exception as inner_e:
                     logging.error(f"Ошибка при обработке источника {source['name']}: {inner_e}")
