@@ -3,13 +3,21 @@ import logging
 import os
 import re
 import html
+import json
+import shutil
+import hashlib
+import tempfile
+import time
+import calendar
 import sqlite3
+from collections import defaultdict
 import aiohttp
 import feedparser
 from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import (
     InlineKeyboardButton, 
     InlineKeyboardMarkup, 
@@ -17,18 +25,27 @@ from aiogram.types import (
     ReplyKeyboardMarkup, 
     KeyboardButton,
     LabeledPrice,
+    FSInputFile,
     PreCheckoutQuery
 )
 
+# Переменные окружения (секреты и токены задаются в настройках хостинга)
 API_TOKEN = os.getenv("BOT_TOKEN")
+if not API_TOKEN:
+    raise SystemExit("Не задана переменная окружения BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8188915960"))
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- DATABASE SETUP ---
-DB_NAME = "users.db"
+# --- НАСТРОЙКА БАЗЫ ДАННЫХ SQLITE ---
+# Если на хостинге подключён постоянный диск, укажите DB_PATH=/путь/к/диску/users.db
+DB_NAME = os.getenv("DB_PATH", "users.db")
+# SKIP_UNMATCHED=1: заказы, у которых не нашлось ключевых слов категории, не рассылаются
+# (по умолчанию 0, как раньше: такие заказы получают категорию источника, обычно «Разработка»)
+SKIP_UNMATCHED = os.getenv("SKIP_UNMATCHED", "0") == "1"
+MAX_ORDER_AGE_HOURS = 6   # старше этого возраста заказы при сканировании не рассылаются
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -61,6 +78,28 @@ def init_db():
             PRIMARY KEY (user_id, region)
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sent_orders (
+            order_id TEXT PRIMARY KEY,
+            source TEXT,
+            ts TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            stars INTEGER,
+            charge_id TEXT UNIQUE,
+            ts TEXT
+        )
+    """)
+    # один приглашённый может принести бонус только один раз
+    try:
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ref_referred ON referrals(referred_id)")
+    except sqlite3.IntegrityError:
+        logging.warning("В referrals есть дубли referred_id, уникальный индекс не создан")
+    cursor.execute("DELETE FROM sent_orders WHERE ts < ?", ((datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),))
     conn.commit()
     conn.close()
 
@@ -134,7 +173,29 @@ RSS_SOURCES = [
 ]
 
 sent_orders = set()
-total_stars_collected = 0
+seeded_sources = set()
+
+def _load_sent_orders():
+    conn = sqlite3.connect(DB_NAME)
+    ids = {r[0] for r in conn.execute("SELECT order_id FROM sent_orders")}
+    conn.close()
+    return ids
+
+sent_orders |= _load_sent_orders()
+
+def db_mark_sent(order_id: str, source_name: str):
+    sent_orders.add(order_id)
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("INSERT OR IGNORE INTO sent_orders (order_id, source, ts) VALUES (?, ?, ?)",
+                 (order_id, source_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+
+def db_source_known(source_name: str) -> bool:
+    conn = sqlite3.connect(DB_NAME)
+    row = conn.execute("SELECT 1 FROM sent_orders WHERE source = ? LIMIT 1", (source_name,)).fetchone()
+    conn.close()
+    return row is not None
 
 def get_main_reply_keyboard(user_id: int):
     kb = [
@@ -176,22 +237,72 @@ def get_categories_keyboard(user_id):
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def clean_html(raw_html):
-    cleanr = re.compile('<.*?>')
-    cleantext = re.sub(cleanr, '', raw_html)
-    return cleantext.strip()[:250] + "..." if len(cleantext) > 250 else cleantext.strip()
+def esc(s) -> str:
+    return html.escape(str(s), quote=False)
+
+def clean_text(raw, limit=None):
+    """HTML-сущности (в т.ч. двойные вида &amp;rsquo;) -> символы, теги убираем, пробелы схлопываем."""
+    s = html.unescape(html.unescape(raw or ""))
+    s = re.sub(r"<.*?>", " ", s)
+    s = html.unescape(s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if limit and len(s) > limit:
+        s = s[:limit].rsplit(" ", 1)[0].rstrip(",.;:- ") + "..."
+    return s
+
+# Ключевые слова ищутся с границы слова, чтобы «ui» не находилось в «Build», «Quiz», «Acquisition»,
+# «бот» в «Работа», а «пост» в «Поставка».
+def _rx(patterns):
+    return re.compile("|".join(f"(?<!\\w)(?:{p})" for p in patterns), re.IGNORECASE)
+
+CATEGORY_RULES = [
+    ("design", _rx([r"дизайн\w*", r"logo\w*", r"ux(?!\w)", r"ui(?!\w)", r"баннер\w*", r"верстк\w*",
+                    r"figma", r"tilda", r"design\w*"])),
+    ("text", _rx([r"текст\w*", r"стать(?:я|и|ю|ей|ями)(?!\w)", r"копирайт\w*",
+                  r"пост(?:а|ы|ов|у|ом|ах)?(?!\w)", r"перевод\w*", r"рерайт\w*", r"content", r"writing"])),
+    ("marketing", _rx([r"маркетинг\w*", r"реклам\w*", r"трафик\w*", r"smm", r"лид(?:а|ы|ов|у|ом)?(?!\w)",
+                       r"seo", r"директ(?:а|у|ом)?(?!\w)", r"marketing"])),
+    ("dev", _rx([r"python", r"бот(?:а|ы|ов|у|ом|ах)?(?!\w)", r"разработчик\w*", r"php", r"скрипт\w*",
+                 r"программист\w*", r"код(?:а|ы|ов|у|ом)?(?!\w)", r"сайт\w*", r"react", r"vue",
+                 r"node", r"c#", r"java(?:script)?(?!\w)", r"1[сc](?!\w)", r"developer\w*"])),
+]
+
+def detect_category(title: str, default: str):
+    for code, rx in CATEGORY_RULES:
+        if rx.search(title):
+            return code
+    return None if SKIP_UNMATCHED else default
+
+_BUDGET_RX = re.compile(
+    r"(?:[$€]\s?\d[\d\s.,]*\d|\d[\d\s.,]*\s?(?:руб\w*|₽|\$|usd|eur|€|тыс\w*|р\.))",
+    re.IGNORECASE)
 
 def smart_ai_filter(title, summary):
-    full_text = (title + " " + summary).lower()
-    budget_match = re.search(r'(\d+[\s\d]*)\s?(руб|₽|\$|usd|eur|€|тыс|р\.)', full_text)
-    budget = budget_match.group(0).upper() if budget_match else "По договоренности"
-    return budget
+    """Не ИИ, а поиск суммы в тексте регулярным выражением. Валюты не конвертируются."""
+    m = _BUDGET_RX.search((title + " " + summary).lower())
+    return m.group(0).strip().upper() if m else "По договоренности"
+
+def age_text(entry):
+    st = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not st:
+        return "", None
+    ts = calendar.timegm(st)
+    mins = int((time.time() - ts) // 60)
+    if mins < 0:
+        return "", ts
+    if mins < 1:
+        return "только что", ts
+    if mins < 60:
+        return f"{mins} мин назад", ts
+    if mins < 60 * 24:
+        return f"{mins // 60} ч назад", ts
+    return f"{mins // (60 * 24)} дн назад", ts
 
 async def fetch_rss_feed(url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     text = await resp.text()
                     feed = await asyncio.to_thread(feedparser.parse, text)
@@ -199,6 +310,47 @@ async def fetch_rss_feed(url):
     except Exception as e:
         logging.error(f"Ошибка загрузки ленты {url}: {e}")
     return None
+
+def parse_entry(source, entry):
+    title = clean_text(entry.get("title", ""))
+    summary = clean_text(entry.get("summary", "") or "Описание отсутствует", limit=250)
+    published, ts = age_text(entry)
+    return {
+        "title": title,
+        "link": entry.get("link", ""),
+        "summary": summary,
+        "cat": detect_category(title, source["default_cat"]),
+        "budget": smart_ai_filter(title, summary),
+        "published": published,
+        "ts": ts,
+        "source": source,
+    }
+
+def build_card(head: str, o: dict) -> str:
+    badge = "🇷🇺 RU" if o["source"]["region"] == "ru" else "🌐 GLOBAL"
+    lines = [
+        f"<b>{head} [{esc(CATEGORIES[o['cat']])}] ({badge})</b>",
+        "",
+        f"📌 <b>{esc(o['title'])}</b>",
+        f"💰 <b>Бюджет:</b> <code>{esc(o['budget'])}</code>",
+        f"🌐 <b>Источник:</b> {esc(o['source']['name'])}",
+    ]
+    if o["published"]:
+        lines.append(f"🕒 <b>Опубликован:</b> {esc(o['published'])}")
+    lines += ["", f"📝 {esc(o['summary'])}"]
+    return "\n".join(lines)
+
+async def safe_send(user_id, text, keyboard):
+    for attempt in range(2):
+        try:
+            await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="HTML")
+            return True
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+        except Exception as e:
+            logging.error(f"Ошибка отправки пользователю {user_id}: {e}")
+            return False
+    return False
 
 async def send_latest_order_immediately(user_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -208,43 +360,30 @@ async def send_latest_order_immediately(user_id: int):
     cursor.execute("SELECT region FROM regions WHERE user_id = ?", (user_id,))
     user_regs = {row[0] for row in cursor.fetchall()}
     conn.close()
-    
-    for source in RSS_SOURCES:
-        if source["region"] not in user_regs:
+
+    sources = [s for s in RSS_SOURCES if s["region"] in user_regs]
+    feeds = await asyncio.gather(*(fetch_rss_feed(s["url"]) for s in sources))
+
+    found = []
+    for source, feed in zip(sources, feeds):
+        if not feed or not getattr(feed, "entries", None):
             continue
-        feed = await fetch_rss_feed(source["url"])
-        if feed and hasattr(feed, "entries") and feed.entries:
-            for entry in feed.entries[:10]:
-                title = html.unescape(entry.title)
-                link = entry.link
-                summary = html.unescape(clean_html(entry.get("summary", "Описание отсутствует")))
-                cat_code = source["default_cat"]
-                title_lower = title.lower()
-                
-                if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка", "figma", "tilda", "design"]):
-                    cat_code = "design"
-                elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод", "рерайт", "content", "writing"]):
-                    cat_code = "text"
-                elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид", "seo", "директ", "marketing"]):
-                    cat_code = "marketing"
-                elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "react", "vue", "node", "c#", "java", "1с", "developer"]):
-                    cat_code = "dev"
-                    
-                if not user_cats or cat_code in user_cats:
-                    budget = smart_ai_filter(title, summary)
-                    reg_badge = "🇷🇺 RU" if source["region"] == "ru" else "🌐 GLOBAL"
-                    text = (
-                        f"⚡️ **Свежий заказ с биржи [{CATEGORIES[cat_code]}] ({reg_badge})**\n\n"
-                        f"📌 **{title}**\n"
-                        f"💰 **Бюджет:** `{budget}`\n"
-                        f"🌐 **Источник:** `{source['name']}`\n\n"
-                        f"📝 {summary}"
-                    )
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=link)]
-                    ])
-                    await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
-                    return
+        for entry in feed.entries[:10]:
+            o = parse_entry(source, entry)
+            if o["cat"] and (not user_cats or o["cat"] in user_cats):
+                found.append(o)
+
+    if not found:
+        await bot.send_message(
+            user_id,
+            "Пока в лентах нет подходящих заказов. Как только появится новый, пришлю его сюда.")
+        return
+
+    best = max(found, key=lambda o: o["ts"] or 0)   # самый свежий из найденных
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Откликнуться на бирже", url=best["link"])]
+    ])
+    await safe_send(user_id, build_card("⚡️ Последний заказ", best), keyboard)
 
 async def trigger_radar_activation(user_id: int, message_or_callback):
     if not is_subscription_active(user_id):
@@ -259,8 +398,8 @@ async def trigger_radar_activation(user_id: int, message_or_callback):
         "🚀 **Радар успешно запущен!**\n\n"
         "🛰 **Как поступают заказы:**\n"
         "• Ниже прислан **последний актуальный проект** с бирж для проверки связи.\n"
-        "• Бот сканирует 7 крупных площадок каждые **45 секунд**.\n"
-        "• Заказы отправляются **сразу в момент публикации**!"
+        "• Бот просматривает 7 площадок каждые **45 секунд**.\n"
+        "• Новые заказы приходят в течение минуты после появления в ленте."
     )
     
     if isinstance(message_or_callback, types.Message):
@@ -275,33 +414,20 @@ async def trigger_radar_activation(user_id: int, message_or_callback):
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     user_data = db_get_user(user_id)
-    
+    is_new = user_data is None
+
     args = message.text.split(maxsplit=1)
     source = "Прямой переход 🔍"
-    
+    referrer_id = None
+
     if len(args) > 1:
-        param = args[1].lower()
+        param = args[1].strip().lower()
         if param.startswith("ref_"):
             try:
-                referrer_id = int(param.replace("ref_", ""))
-                if referrer_id != user_id:
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
-                    cursor.execute("INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)", (referrer_id, user_id))
-                    conn.commit()
-                    conn.close()
+                rid = int(param[4:])
+                if rid != user_id:
+                    referrer_id = rid
                     source = "Реферал"
-                    add_subscription_days(referrer_id, 7)
-                    try:
-                        await bot.send_message(
-                            referrer_id,
-                            f"🎉 **Новый реферал!**\n"
-                            f"По вашей ссылке зарегистрировался новый пользователь.\n"
-                            f"🎁 Вам начислено **+7 дней бесплатной подписки**!",
-                            parse_mode="Markdown"
-                        )
-                    except Exception as e:
-                        logging.error(f"Ошибка уведомления реферера {referrer_id}: {e}")
             except ValueError:
                 pass
         elif param in ["tt", "tiktok"]:
@@ -311,19 +437,41 @@ async def cmd_start(message: types.Message):
         elif param in ["yt", "youtube", "shorts"]:
             source = "YouTube Shorts ▶️"
         else:
-            source = f"Кампания ({param})"
+            source = f"Кампания ({param[:40]})"
 
-    if not user_data:
+    if is_new:
         db_register_user(user_id, source)
+        # бонус только за нового пользователя и только существующему пригласившему
+        if referrer_id and db_get_user(referrer_id):
+            conn = sqlite3.connect(DB_NAME)
+            cur = conn.execute("INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
+                               (referrer_id, user_id))
+            rewarded = cur.rowcount > 0
+            conn.commit()
+            conn.close()
+            if rewarded:
+                add_subscription_days(referrer_id, 7)
+                try:
+                    await bot.send_message(
+                        referrer_id,
+                        "🎉 <b>Новый реферал!</b>\n"
+                        "По вашей ссылке зарегистрировался новый пользователь.\n"
+                        "🎁 Вам начислено <b>+7 дней бесплатной подписки</b>!",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logging.error(f"Ошибка уведомления реферера {referrer_id}: {e}")
 
+    greeting = ("🎁 Вам активирован пробный период на <b>3 дня</b>!" if is_new
+                else "С возвращением! Ваши настройки сохранены.")
     await message.answer(
-        f"Привет, {message.from_user.first_name}! 👋\n\n"
-        f"🤖 **Freelance Radar AI** — ваш персональный агрегатор заказов.\n"
-        f"🎁 Вам активирован пробный период на **3 дня**!\n\n"
-        f"💡 **Пользуйтесь ботом бесплатно:**\n"
-        f"Делитесь вашей ссылкой с коллегами и получайте **+7 дней PRO-доступа** за каждого пришедшего друга!",
+        f"Привет, {esc(message.from_user.first_name)}! 👋\n\n"
+        f"🤖 <b>Freelance Radar AI</b> — ваш персональный агрегатор заказов.\n"
+        f"{greeting}\n\n"
+        f"💡 <b>Пользуйтесь ботом бесплатно:</b>\n"
+        f"Делитесь вашей ссылкой с коллегами и получайте <b>+7 дней PRO-доступа</b> за каждого пришедшего друга!",
         reply_markup=get_main_reply_keyboard(user_id),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await message.answer(
         "📍 **Шаг 1 из 2: Выберите регионы бирж**\n\n"
@@ -410,6 +558,8 @@ async def admin_panel(message: types.Message):
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users")
     total_users = cursor.fetchone()[0]
+    cursor.execute("SELECT COALESCE(SUM(stars), 0) FROM payments")
+    total_stars_collected = cursor.fetchone()[0]
     conn.close()
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -433,16 +583,23 @@ async def admin_users_list(callback: CallbackQuery):
     cursor.execute("SELECT user_id, sub_until, source FROM users")
     rows = cursor.fetchall()
     
-    msg = "👥 **Список пользователей:**\n\n"
+    lines = []
     for r in rows:
         uid, sub_until, src = r[0], r[1], r[2]
         status = "✅ Active" if datetime.now() < datetime.strptime(sub_until, "%Y-%m-%d %H:%M:%S") else "❌ Expired"
         cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (uid,))
         refs = cursor.fetchone()[0]
-        msg += f"• ID: `{uid}` | {status} | Рефералов: `{refs}` | Откуда: `{src}`\n"
+        lines.append(f"• ID: {uid} | {status} | Рефералов: {refs} | Откуда: {src}")
     conn.close()
 
-    await callback.message.answer(msg, parse_mode="Markdown")
+    # Telegram режет сообщения длиннее 4096 символов, поэтому шлём частями
+    chunk = "👥 Список пользователей:\n\n"
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3800:
+            await callback.message.answer(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    await callback.message.answer(chunk)
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_sources")
@@ -455,14 +612,14 @@ async def admin_sources_stats(callback: CallbackQuery):
     rows = cursor.fetchall()
     conn.close()
 
-    msg = "📊 **Статистика по источникам (UTM):**\n\n"
+    msg = "📊 Статистика по источникам (UTM):\n\n"
     if not rows:
         msg += "Пока нет данных о переходах."
     else:
         for src_name, count in rows:
-            msg += f"• {src_name}: `{count}` чел.\n"
+            msg += f"• {src_name}: {count} чел.\n"
             
-    await callback.message.answer(msg, parse_mode="Markdown")
+    await callback.message.answer(msg)
     await callback.answer()
 
 @dp.message(F.text == "ℹ️ Помощь")
@@ -471,7 +628,7 @@ async def btn_help(message: types.Message):
         "ℹ️ **Как работает Freelance Radar AI:**\n\n"
         "1. **Шаг 1:** Выберите регионы бирж (Россия / Международные).\n"
         "2. **Шаг 2:** Укажите сферы работы (Разработка, Дизайн и др.).\n"
-        "3. **Мониторинг:** Бот проверяет 7 крупных бирж каждые 45 секунд и отправляет заказы сразу в момент их публикации!\n\n"
+        "3. **Мониторинг:** Бот просматривает 7 площадок каждые 45 секунд и присылает новые заказы в течение минуты после появления в ленте.\n\n"
         "🎁 Жмите кнопку «🎁 Бесплатный доступ», чтобы приглашать друзей и получать подписку бесплатно!",
         reply_markup=get_main_reply_keyboard(message.from_user.id),
         parse_mode="Markdown"
@@ -568,83 +725,169 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: types.Message):
-    global total_stars_collected
-    total_stars_collected += 333
-    add_subscription_days(message.from_user.id, 30)
+    pay = message.successful_payment
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.execute("INSERT OR IGNORE INTO payments (user_id, stars, charge_id, ts) VALUES (?, ?, ?, ?)",
+                       (message.from_user.id, pay.total_amount, pay.telegram_payment_charge_id,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    first_time = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    if first_time:
+        add_subscription_days(message.from_user.id, 30)
+        try:
+            await backup_db(force=True)   # оплату терять нельзя: копия сразу
+        except Exception as e:
+            logging.error(f"Бэкап после оплаты не удался: {e}")
     await message.answer("🎉 Оплата прошла успешно! Добавлено +30 дней.", reply_markup=get_main_reply_keyboard(message.from_user.id))
+
+async def broadcast_order(o: dict):
+    if not o["cat"]:
+        return
+    region = o["source"]["region"]
+    conn = sqlite3.connect(DB_NAME)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    users = [r[0] for r in conn.execute("SELECT user_id FROM users WHERE sub_until > ?", (now,))]
+    regs, cats = defaultdict(set), defaultdict(set)
+    for uid, reg in conn.execute("SELECT user_id, region FROM regions"):
+        regs[uid].add(reg)
+    for uid, cat in conn.execute("SELECT user_id, category FROM preferences"):
+        cats[uid].add(cat)
+    conn.close()
+
+    text = build_card("🔥 Новый заказ!", o)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Откликнуться", url=o["link"])]])
+    for uid in users:
+        if region in regs[uid] and (not cats[uid] or o["cat"] in cats[uid]):
+            await safe_send(uid, text, keyboard)
+            await asyncio.sleep(0.05)
+
+async def process_source(source):
+    feed = await fetch_rss_feed(source["url"])
+    if not feed or not getattr(feed, "entries", None):
+        return
+    pending = []
+    for entry in feed.entries[:15]:
+        key = f"{source['name']}|{entry.get('id') or entry.get('link')}"
+        if key not in sent_orders:
+            pending.append((key, entry))
+    if not pending:
+        return
+
+    # Первый проход по источнику после старта процесса: молча запоминаем текущую ленту.
+    # Так после деплоя, перезапуска или восстановления базы из копии пользователи не получают
+    # десятки старых заказов разом (цена: заказы, вышедшие за время простоя, не рассылаются).
+    if source["name"] not in seeded_sources:
+        seeded_sources.add(source["name"])
+        for key, _ in pending:
+            db_mark_sent(key, source["name"])
+        return
+
+    for key, entry in reversed(pending):   # от старых к новым
+        db_mark_sent(key, source["name"])
+        o = parse_entry(source, entry)
+        if o["ts"] and time.time() - o["ts"] > MAX_ORDER_AGE_HOURS * 3600:
+            continue
+        await broadcast_order(o)
 
 async def real_order_scanner():
     while True:
         try:
-            for source in RSS_SOURCES:
-                try:
-                    feed = await fetch_rss_feed(source["url"])
-                    if not feed or not hasattr(feed, "entries"):
-                        continue
-                    
-                    for entry in feed.entries[:15]:
-                        order_id = entry.get("id", entry.link)
-                        if order_id in sent_orders:
-                            continue
-                            
-                        title = html.unescape(entry.title)
-                        link = entry.link
-                        summary = html.unescape(clean_html(entry.get("summary", "Описание отсутствует")))
-                        
-                        cat_code = source["default_cat"]
-                        source_region = source["region"]
-                        title_lower = title.lower()
-                        
-                        if any(w in title_lower for w in ["дизайн", "logo", "ux", "ui", "баннер", "верстка", "figma", "tilda", "design"]):
-                            cat_code = "design"
-                        elif any(w in title_lower for w in ["текст", "статья", "копирайт", "пост", "перевод", "рерайт", "content", "writing"]):
-                            cat_code = "text"
-                        elif any(w in title_lower for w in ["маркетинг", "реклама", "трафик", "smm", "лид", "seo", "директ", "marketing"]):
-                            cat_code = "marketing"
-                        elif any(w in title_lower for w in ["python", "бот", "разработчик", "php", "скрипт", "программист", "код", "сайт", "react", "vue", "node", "c#", "java", "1с", "developer"]):
-                            cat_code = "dev"
-
-                        budget = smart_ai_filter(title, summary)
-                        
-                        conn = sqlite3.connect(DB_NAME)
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT user_id FROM users")
-                        users = cursor.fetchall()
-                        
-                        for (u_id,) in users:
-                            if is_subscription_active(u_id):
-                                cursor.execute("SELECT region FROM regions WHERE user_id = ?", (u_id,))
-                                u_regs = {r[0] for r in cursor.fetchall()}
-                                cursor.execute("SELECT category FROM preferences WHERE user_id = ?", (u_id,))
-                                u_cats = {r[0] for r in cursor.fetchall()}
-                                
-                                if source_region in u_regs and (not u_cats or cat_code in u_cats):
-                                    try:
-                                        reg_badge = "🇷🇺 RU" if source_region == "ru" else "🌐 GLOBAL"
-                                        text = (
-                                            f"🔥 **Новый заказ! [{CATEGORIES[cat_code]}] ({reg_badge})**\n\n"
-                                            f"📌 **{title}**\n"
-                                            f"💰 **Бюджет:** `{budget}`\n"
-                                            f"🌐 **Источник:** `{source['name']}`\n\n"
-                                            f"📝 {summary}"
-                                        )
-                                        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                                            [InlineKeyboardButton(text="💬 Откликнуться", url=link)]
-                                        ])
-                                        await bot.send_message(u_id, text, reply_markup=keyboard, parse_mode="Markdown")
-                                        await asyncio.sleep(0.05)
-                                    except Exception as e:
-                                        logging.error(f"Ошибка отправки пользователю {u_id}: {e}")
-                                        
-                        conn.close()
-                        sent_orders.add(order_id)
-                except Exception as inner_e:
-                    logging.error(f"Ошибка при обработке источника {source['name']}: {inner_e}")
-                    continue
+            results = await asyncio.gather(*(process_source(s) for s in RSS_SOURCES), return_exceptions=True)
+            for source, res in zip(RSS_SOURCES, results):
+                if isinstance(res, Exception):
+                    logging.error(f"Ошибка при обработке источника {source['name']}: {res}")
         except Exception as e:
             logging.error(f"Ошибка в сканере заказов: {e}")
-            
         await asyncio.sleep(45)
+
+# --- РЕЗЕРВНАЯ КОПИЯ БАЗЫ В TELEGRAM ---
+# На бесплатном Render файлы пропадают при деплое и перезапуске. Поэтому бот присылает
+# администратору файл users.db (только если данные изменились) и закрепляет его в чате.
+# При старте с пустой базой бот скачивает закреплённый файл и восстанавливает данные.
+BACKUP_EVERY_SEC = 120
+BACKUP_TABLES = ("users", "referrals", "preferences", "regions", "payments")
+_backup_lock = asyncio.Lock()
+_last_hash = None
+_last_backup_msg = None
+
+def _users_count() -> int:
+    conn = sqlite3.connect(DB_NAME)
+    n = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    conn.close()
+    return n
+
+def _state_hash() -> str:
+    conn = sqlite3.connect(DB_NAME)
+    data = {t: conn.execute(f"SELECT * FROM {t} ORDER BY 1, 2").fetchall() for t in BACKUP_TABLES}
+    conn.close()
+    return hashlib.sha256(json.dumps(data, default=str, sort_keys=True).encode()).hexdigest()
+
+async def backup_db(force: bool = False):
+    global _last_hash, _last_backup_msg
+    async with _backup_lock:
+        # пустую базу не сохраняем: она не должна затереть хорошую копию
+        if await asyncio.to_thread(_users_count) == 0:
+            return
+        h = await asyncio.to_thread(_state_hash)
+        if not force and h == _last_hash:
+            return
+        tmp = os.path.join(tempfile.mkdtemp(), "users.db")
+        def snapshot():
+            s = sqlite3.connect(DB_NAME); d = sqlite3.connect(tmp)
+            s.backup(d); d.close(); s.close()
+        await asyncio.to_thread(snapshot)
+        msg = await bot.send_document(
+            ADMIN_ID, FSInputFile(tmp, filename="users.db"),
+            caption=f"🗄 Резервная копия базы, {datetime.now().strftime('%d.%m %H:%M')}",
+            disable_notification=True)
+        try:
+            await bot.unpin_all_chat_messages(ADMIN_ID)
+            await bot.pin_chat_message(ADMIN_ID, msg.message_id, disable_notification=True)
+        except Exception as e:
+            logging.error(f"Не удалось закрепить копию базы: {e}")
+        if _last_backup_msg:
+            try:
+                await bot.delete_message(ADMIN_ID, _last_backup_msg)
+            except Exception:
+                pass
+        _last_backup_msg, _last_hash = msg.message_id, h
+
+async def restore_db_if_needed():
+    """Если база пустая (свежий деплой), берём закреплённую копию из чата с администратором."""
+    if await asyncio.to_thread(_users_count) > 0:
+        return
+    try:
+        chat = await bot.get_chat(ADMIN_ID)
+        doc = chat.pinned_message.document if chat.pinned_message else None
+        if not doc or not (doc.file_name or "").startswith("users"):
+            logging.warning("Закреплённой копии базы нет, стартуем с чистой базы")
+            return
+        tmp = os.path.join(tempfile.mkdtemp(), "restore.db")
+        await bot.download(doc.file_id, destination=tmp)
+        chk = sqlite3.connect(tmp)
+        ok = chk.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        cnt = chk.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        chk.close()
+        if not ok or cnt == 0:
+            logging.warning("Копия базы повреждена или пуста, не восстанавливаем")
+            return
+        shutil.copyfile(tmp, DB_NAME)
+        init_db()                      # добавит таблицы, которых не было в старой копии
+        sent_orders.clear()
+        sent_orders.update(_load_sent_orders())
+        logging.info(f"База восстановлена из копии: {cnt} пользователей")
+        await bot.send_message(ADMIN_ID, f"♻️ База восстановлена из резервной копии: {cnt} пользователей.")
+    except Exception as e:
+        logging.error(f"Не удалось восстановить базу: {e}")
+
+async def backup_loop():
+    while True:
+        await asyncio.sleep(BACKUP_EVERY_SEC)
+        try:
+            await backup_db()
+        except Exception as e:
+            logging.error(f"Ошибка резервного копирования: {e}")
 
 async def handle(request):
     return web.Response(text="Bot is running!")
@@ -661,8 +904,9 @@ async def web_server():
         await asyncio.sleep(3600)
 
 async def main():
-    asyncio.create_task(web_server())
-    asyncio.create_task(real_order_scanner())
+    await restore_db_if_needed()
+    background = [asyncio.create_task(web_server()), asyncio.create_task(real_order_scanner()),
+                  asyncio.create_task(backup_loop())]
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
