@@ -530,7 +530,7 @@ async def btn_subscription(message: types.Message):
     ref_count = cursor.fetchone()[0]
     conn.close()
 
-    share_msg = "Нашёл крутого AI-бота, который собирает заказы со всех фриланс-бирж!"
+    share_msg = "🚀 Нашёл бота, который сам присылает заказы для фрилансеров с 7 площадок! 🎁 3 дня бесплатно 👇"
     share_text = f"https://t.me/share/url?url={quote(ref_link, safe='')}&text={quote(share_msg, safe='')}"
     
     text = (
@@ -540,7 +540,8 @@ async def btn_subscription(message: types.Message):
         f"🚀 **Как пользоваться ботом бесплатно:**\n"
         f"Приглашайте коллег и друзей-фрилансеров! За каждого человека вы получаете **+7 дней PRO-доступа**.\n\n"
         f"🔗 **Ваша личная ссылка:**\n`{ref_link}`\n\n"
-        f"📊 **Приглашено людей:** `{ref_count}`"
+        f"📊 **Приглашено людей:** `{ref_count}`\n\n"
+        f"📨 Ниже готовое приглашение: перешлите его другу, ссылка в нём кликабельная."
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -548,6 +549,20 @@ async def btn_subscription(message: types.Message):
         [InlineKeyboardButton(text="⭐ Купить подписку за Stars (333 Stars)", callback_data="buy_stars")]
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+
+    # Готовое приглашение: его можно переслать друзьям, ссылка и кнопка сохраняются
+    invite = (
+        "🚀 <b>Freelance Radar AI</b>\n"
+        "Бот, который сам ищет заказы для фрилансеров\n\n"
+        "📡 Заказы с 7 площадок прямо в Telegram\n"
+        "🎯 Выбираешь категории и получаешь только своё\n"
+        "🎁 Первые 3 дня бесплатно\n\n"
+        f'👉 <a href="{ref_link}">Попробовать бесплатно</a>'
+    )
+    invite_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Открыть бота", url=ref_link)]
+    ])
+    await message.answer(invite, reply_markup=invite_kb, parse_mode="HTML", disable_web_page_preview=True)
 
 @dp.message(Command("testorder"))
 async def test_order_handler(message: types.Message):
