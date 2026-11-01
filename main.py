@@ -32,6 +32,10 @@ from aiogram.types import (
     KeyboardButton,
     LabeledPrice,
     FSInputFile,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+    SwitchInlineQueryChosenChat,
     PreCheckoutQuery
 )
 
@@ -512,6 +516,20 @@ async def btn_choose_categories(message: types.Message):
 async def btn_start_radar(message: types.Message):
     await trigger_radar_activation(message.from_user.id, message)
 
+def build_invite(ref_link: str):
+    text = (
+        "🚀 <b>Freelance Radar AI</b>\n"
+        "Бот, который сам ищет заказы для фрилансеров\n\n"
+        "📡 Заказы с 7 площадок прямо в Telegram\n"
+        "🎯 Выбираешь категории и получаешь только своё\n"
+        "🎁 Первые 3 дня бесплатно\n\n"
+        f'👉 <a href="{ref_link}">Попробовать бесплатно</a>'
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Открыть бота", url=ref_link)]
+    ])
+    return text, kb
+
 @dp.message(F.text.in_(["🎁 Бесплатный доступ", "💳 Подписка"]))
 async def btn_subscription(message: types.Message):
     user_id = message.from_user.id
@@ -530,8 +548,6 @@ async def btn_subscription(message: types.Message):
     ref_count = cursor.fetchone()[0]
     conn.close()
 
-    share_msg = "🚀 Нашёл бота, который сам присылает заказы для фрилансеров с 7 площадок! 🎁 3 дня бесплатно 👇"
-    share_text = f"https://t.me/share/url?url={quote(ref_link, safe='')}&text={quote(share_msg, safe='')}"
     
     text = (
         f"🎁 **Партнерская программа & Доступ**\n\n"
@@ -545,24 +561,34 @@ async def btn_subscription(message: types.Message):
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📲 Поделиться ссылкой с другом", url=share_text)],
+        [InlineKeyboardButton(
+            text="📲 Поделиться с другом",
+            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                query="", allow_user_chats=True, allow_group_chats=True,
+                allow_channel_chats=False, allow_bot_chats=False))],
         [InlineKeyboardButton(text="⭐ Купить подписку за Stars (333 Stars)", callback_data="buy_stars")]
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
     # Готовое приглашение: его можно переслать друзьям, ссылка и кнопка сохраняются
-    invite = (
-        "🚀 <b>Freelance Radar AI</b>\n"
-        "Бот, который сам ищет заказы для фрилансеров\n\n"
-        "📡 Заказы с 7 площадок прямо в Telegram\n"
-        "🎯 Выбираешь категории и получаешь только своё\n"
-        "🎁 Первые 3 дня бесплатно\n\n"
-        f'👉 <a href="{ref_link}">Попробовать бесплатно</a>'
-    )
-    invite_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Открыть бота", url=ref_link)]
-    ])
+    invite, invite_kb = build_invite(ref_link)
     await message.answer(invite, reply_markup=invite_kb, parse_mode="HTML", disable_web_page_preview=True)
+
+@dp.inline_query()
+async def inline_invite(query: InlineQuery):
+    """Кнопка «Поделиться с другом»: отдаёт готовое приглашение со встроенной ссылкой."""
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{query.from_user.id}"
+    text, kb = build_invite(ref_link)
+    result = InlineQueryResultArticle(
+        id=f"invite_{query.from_user.id}",
+        title="🚀 Пригласить друга в Freelance Radar AI",
+        description="Заказы с 7 площадок в Telegram, 3 дня бесплатно",
+        input_message_content=InputTextMessageContent(
+            message_text=text, parse_mode="HTML", disable_web_page_preview=True),
+        reply_markup=kb,
+    )
+    await query.answer([result], cache_time=5, is_personal=True)
 
 @dp.message(Command("testorder"))
 async def test_order_handler(message: types.Message):
