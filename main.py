@@ -9,6 +9,12 @@ import hashlib
 import tempfile
 import time
 import calendar
+from urllib.parse import quote
+from datetime import timezone
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 import sqlite3
 from collections import defaultdict
 import aiohttp
@@ -45,6 +51,15 @@ DB_NAME = os.getenv("DB_PATH", "users.db")
 # SKIP_UNMATCHED=1: заказы, у которых не нашлось ключевых слов категории, не рассылаются
 # (по умолчанию 0, как раньше: такие заказы получают категорию источника, обычно «Разработка»)
 SKIP_UNMATCHED = os.getenv("SKIP_UNMATCHED", "0") == "1"
+# Часовой пояс для подписей, которые видит администратор (по умолчанию Рим, UTC+1/+2)
+TZ_NAME = os.getenv("TZ_NAME", "Europe/Rome")
+
+def local_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo(TZ_NAME))
+    except Exception:
+        return datetime.now(timezone(timedelta(hours=1)))
+
 MAX_ORDER_AGE_HOURS = 6   # старше этого возраста заказы при сканировании не рассылаются
 
 def init_db():
@@ -515,7 +530,8 @@ async def btn_subscription(message: types.Message):
     ref_count = cursor.fetchone()[0]
     conn.close()
 
-    share_text = f"https://t.me/share/url?url={ref_link}&text=Нашел%20крутого%20AI-бота,%20который%20собирает%20заказы%20со%20всех%20фриланс-бирж!"
+    share_msg = "Нашёл крутого AI-бота, который собирает заказы со всех фриланс-бирж!"
+    share_text = f"https://t.me/share/url?url={quote(ref_link, safe='')}&text={quote(share_msg, safe='')}"
     
     text = (
         f"🎁 **Партнерская программа & Доступ**\n\n"
@@ -839,7 +855,7 @@ async def backup_db(force: bool = False):
         await asyncio.to_thread(snapshot)
         msg = await bot.send_document(
             ADMIN_ID, FSInputFile(tmp, filename="users.db"),
-            caption=f"🗄 Резервная копия базы, {datetime.now().strftime('%d.%m %H:%M')}",
+            caption=f"🗄 Резервная копия базы, {local_now().strftime('%d.%m %H:%M')}",
             disable_notification=True)
         try:
             await bot.unpin_all_chat_messages(ADMIN_ID)
