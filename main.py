@@ -32,6 +32,10 @@ from aiogram.types import (
     KeyboardButton,
     LabeledPrice,
     FSInputFile,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+    SwitchInlineQueryChosenChat,
     PreCheckoutQuery
 )
 
@@ -546,24 +550,43 @@ async def btn_subscription(message: types.Message):
 
     
     text = (
-        f"🎁 **Партнерская программа & Доступ**\n\n"
+        f"🎁 **Бесплатный доступ за приглашения**\n\n"
         f"• **Статус подписки:** {status_text}\n\n"
         f"───\n\n"
         f"🚀 **Как пользоваться ботом бесплатно:**\n"
         f"Приглашайте коллег и друзей-фрилансеров! За каждого человека вы получаете **+7 дней PRO-доступа**.\n\n"
         f"🔗 **Ваша личная ссылка:**\n`{ref_link}`\n\n"
         f"📊 **Приглашено людей:** `{ref_count}`\n\n"
-        f"📨 Ниже готовое приглашение: перешлите его другу, ссылка в нём кликабельная."
+        f"👇 Нажмите «Поделиться с другом», выберите чат, и приглашение уйдёт с готовой кнопкой."
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📲 Поделиться с другом",
+            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                query="", allow_user_chats=True, allow_group_chats=True,
+                allow_channel_chats=False, allow_bot_chats=False))],
         [InlineKeyboardButton(text="⭐ Купить подписку за Stars (333 Stars)", callback_data="buy_stars")]
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
-    # Готовое приглашение: его можно переслать друзьям, ссылка и кнопка сохраняются
-    invite, invite_kb = build_invite(ref_link)
-    await message.answer(invite, reply_markup=invite_kb, parse_mode="HTML", disable_web_page_preview=True)
+
+@dp.inline_query()
+async def inline_invite(query: InlineQuery):
+    """Кнопка «Поделиться с другом»: отдаёт готовое приглашение со встроенной ссылкой.
+    Требует включённого inline-режима у бота (@BotFather: /setinline)."""
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{query.from_user.id}"
+    text, kb = build_invite(ref_link)
+    result = InlineQueryResultArticle(
+        id=f"invite_{query.from_user.id}",
+        title="🚀 Пригласить друга в Freelance Radar AI",
+        description="Заказы с 7 площадок в Telegram, 3 дня бесплатно",
+        input_message_content=InputTextMessageContent(
+            message_text=text, parse_mode="HTML", disable_web_page_preview=True),
+        reply_markup=kb,
+    )
+    await query.answer([result], cache_time=5, is_personal=True)
 
 @dp.message(Command("testorder"))
 async def test_order_handler(message: types.Message):
