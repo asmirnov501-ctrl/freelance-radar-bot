@@ -276,14 +276,21 @@ def _rx(patterns):
 
 CATEGORY_RULES = [
     ("design", _rx([r"дизайн\w*", r"logo\w*", r"ux(?!\w)", r"ui(?!\w)", r"баннер\w*", r"верстк\w*",
-                    r"figma", r"tilda", r"design\w*"])),
+                    r"figma", r"tilda", r"design\w*", r"graphic\w*", r"illustrat\w*", r"branding", r"photoshop",
+                    r"animat\w*", r"motion"])),
     ("text", _rx([r"текст\w*", r"стать(?:я|и|ю|ей|ями)(?!\w)", r"копирайт\w*",
-                  r"пост(?:а|ы|ов|у|ом|ах)?(?!\w)", r"перевод\w*", r"рерайт\w*", r"content", r"writing"])),
+                  r"пост(?:а|ы|ов|у|ом|ах)?(?!\w)", r"перевод\w*", r"рерайт\w*", r"content", r"writing", r"copywrit\w*", r"writer\w*", r"translat\w*",
+                  r"proofread\w*", r"blog\w*", r"article\w*", r"transcri\w*"])),
     ("marketing", _rx([r"маркетинг\w*", r"реклам\w*", r"трафик\w*", r"smm", r"лид(?:а|ы|ов|у|ом)?(?!\w)",
-                       r"seo", r"директ(?:а|у|ом)?(?!\w)", r"marketing"])),
+                       r"seo", r"директ(?:а|у|ом)?(?!\w)", r"marketing", r"social\s?media", r"advertis\w*", r"growth",
+                       r"ppc(?!\w)", r"lead\s?gen\w*", r"campaign\w*", r"email\s?market\w*"])),
     ("dev", _rx([r"python", r"бот(?:а|ы|ов|у|ом|ах)?(?!\w)", r"разработчик\w*", r"php", r"скрипт\w*",
                  r"программист\w*", r"код(?:а|ы|ов|у|ом)?(?!\w)", r"сайт\w*", r"react", r"vue",
-                 r"node", r"c#", r"java(?:script)?(?!\w)", r"1[сc](?!\w)", r"developer\w*"])),
+                 r"node", r"c#", r"java(?:script)?(?!\w)", r"1[сc](?!\w)", r"developer\w*", r"engineer\w*",
+                 r"programm\w*", r"software", r"backend", r"front-?end", r"full-?stack", r"devops",
+                 r"api(?!\w)", r"typescript", r"django", r"flutter", r"android", r"ios(?!\w)",
+                 r"wordpress", r"shopify", r"data\s?(?:scien\w*|engineer\w*)", r"machine\s?learning",
+                 r"golang", r"ruby", r"rust(?!\w)"])),
 ]
 
 def detect_category(title: str, default: str):
@@ -663,17 +670,25 @@ async def admin_sources_stats(callback: CallbackQuery):
         return
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT source, COUNT(*) FROM users GROUP BY source")
+    cursor.execute("""
+        SELECT u.source,
+               COUNT(*),
+               SUM(CASE WHEN EXISTS (SELECT 1 FROM referrals r WHERE r.referrer_id = u.user_id) THEN 1 ELSE 0 END),
+               SUM(CASE WHEN EXISTS (SELECT 1 FROM payments p WHERE p.user_id = u.user_id) THEN 1 ELSE 0 END)
+        FROM users u GROUP BY u.source ORDER BY COUNT(*) DESC
+    """)
     rows = cursor.fetchall()
     conn.close()
 
-    msg = "📊 Статистика по источникам (UTM):\n\n"
+    msg = "📊 Откуда приходят люди:\n\n"
     if not rows:
         msg += "Пока нет данных о переходах."
     else:
-        for src_name, count in rows:
-            msg += f"• {src_name}: {count} чел.\n"
-            
+        total = sum(r[1] for r in rows)
+        for src_name, count, inviters, payers in rows:
+            msg += f"• {src_name}: {count} чел. | пригласили друга: {inviters or 0} | оплатили: {payers or 0}\n"
+        msg += f"\nВсего: {total}"
+
     await callback.message.answer(msg)
     await callback.answer()
 
